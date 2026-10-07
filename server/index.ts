@@ -6,6 +6,7 @@ import { Platform } from './platform';
 import { Store } from './store';
 import { hash } from './security';
 nextEnv.loadEnvConfig(process.cwd());
+if (process.env.NEARDROP_TEST_EPHEMERAL === '1' && process.env.NODE_ENV !== 'production') delete process.env.DATABASE_URL;
 const dev = process.env.NODE_ENV !== 'production';
 const port = Number(process.env.PORT || 3000);
 const origin = process.env.APP_ORIGIN || `http://localhost:${port}`;
@@ -24,7 +25,11 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 65536, perMessageD
 const alive = new WeakMap<import('ws').WebSocket, boolean>();
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url!, origin);
-  if (url.pathname !== '/api/v1/events') { void app.getUpgradeHandler()(req, socket, head); return; }
+  // Keep raw WebSockets outside Next's API catch-all. Next installs its own
+  // upgrade listener and ends upgrades that match an App Router HTTP route.
+  // Rewrite the legacy URL for that listener so existing native clients work.
+  if (url.pathname === '/api/v1/events') req.url = `/realtime${url.search}`;
+  else if (url.pathname !== '/realtime') return; // Next owns HMR upgrades.
   if (req.headers.origin && req.headers.origin !== origin) { socket.destroy(); return; }
   const ticketHash = hash(url.searchParams.get('ticket') || '');
   const ticket = platform.tickets.get(ticketHash); platform.tickets.delete(ticketHash);

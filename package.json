@@ -8,9 +8,11 @@
     "build": "next build",
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "node --liftoff-only --import tsx --test --test-concurrency=1 tests/*.test.ts",
     "test:e2e": "playwright test",
-    "test:serve": "cross-env PORT=3117 APP_ORIGIN=http://localhost:3117 tsx server/index.ts",
+    "test:serve": "cross-env NEARDROP_TEST_EPHEMERAL=1 PORT=3117 APP_ORIGIN=http://localhost:3117 tsx server/index.ts",
+    "test:vercel": "playwright test --config playwright.vercel.config.ts",
+    "test:serve:vercel": "node --liftoff-only --import tsx tests/helpers/serve-vercel.ts",
     "db:migrate": "tsx server/migrate.ts"
   },
   "dependencies": {
@@ -28,6 +30,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@playwright/test": "^1.58.2",
     "@types/node": "^24.12.0",
     "@types/pg": "^8.16.0",

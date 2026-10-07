@@ -9,10 +9,12 @@ interface Session {
   sink?: ReceiveSink; sequence: number; bytes: number; meter: ProgressMeter;
   candidates: RTCIceCandidateInit[]; aborted: boolean; started: boolean;
   ack?: { sequence: number; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
-  chain: Promise<void>;
+  chain: Promise<void>; checkpointAt: number;
 }
 interface EngineCallbacks {
-  send(event: ClientEvent): void;
+  send(event: ClientEvent): void | Promise<void>;
+  dataChannelAcks?: boolean;
+  relayAvailable?: boolean;
   progress(id: string, value: ReturnType<ProgressMeter['update']>): void;
   received(id: string, content: ReceivedContent): void;
   error(message: string): void;
@@ -27,7 +29,7 @@ export class TransferEngine {
     if (!session) {
       const peer = this.peers().find(d => d.id === (t.senderId === this.deviceId ? t.receiverId : t.senderId));
       if (!peer) throw new Error('The other device is no longer paired.');
-      session = { transfer: t, key: deriveTransferKey(this.identity, peer.publicKey, t.id), sequence: 0, bytes: 0, meter: new ProgressMeter(), candidates: [], aborted: false, started: false, chain: Promise.resolve() };
+      session = { transfer: t, key: deriveTransferKey(this.identity, peer.publicKey, t.id), sequence: 0, bytes: 0, meter: new ProgressMeter(), candidates: [], aborted: false, started: false, chain: Promise.resolve(), checkpointAt: 0 };
       this.sessions.set(t.id, session);
     }
     session.transfer = t; return session;
@@ -95,8 +97,9 @@ export class TransferEngine {
       } catch { session.pc?.close(); session.pc = undefined; session.channel = undefined; }
     }
     if (session.aborted) return;
+    if (transport === 'relay' && this.callbacks.relayAvailable === false) throw new Error('Could not establish a direct connection. Try the same Wi-Fi network, or ask the site owner to configure a TURN service.');
     session.transfer = { ...session.transfer, transport, status: 'transferring' };
-    this.callbacks.send({ type: 'transfer.transport', transferId: session.transfer.id, transport });
+    await this.callbacks.send({ type: 'transfer.transport', transferId: session.transfer.id, transport });
     for (let offset = 0, sequence = 0; offset < file.size; offset += CHUNK_SIZE, sequence++) {
       if (session.aborted) return;
       const data = await encryptChunk(await session.key, sequence, await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer(), session.transfer.id);
@@ -137,7 +140,15 @@ export class TransferEngine {
         if (bytes.byteLength !== Math.min(CHUNK_SIZE, session.transfer.item.size - session.bytes)) throw new Error('File size verification failed.');
         await session.sink.write(bytes); session.bytes += bytes.byteLength; session.sequence++;
         // Acknowledgements mean bytes have been written, not merely put in a send buffer.
-        this.callbacks.send({ type: 'transfer.ack', transferId: session.transfer.id, sequence: event.sequence, bytes: session.bytes });
+        const ack: ClientEvent = { type: 'transfer.ack', transferId: session.transfer.id, sequence: event.sequence, bytes: session.bytes };
+        if (this.callbacks.dataChannelAcks && session.channel?.readyState === 'open') {
+          // Keep per-chunk round trips on the peer channel. Only durable progress
+          // checkpoints use HTTPS; the last one is committed before completion.
+          if (performance.now()-session.checkpointAt >= 1000 || session.bytes === session.transfer.item.size) {
+            await this.callbacks.send(ack); session.checkpointAt = performance.now();
+          }
+          session.channel.send(JSON.stringify(ack));
+        } else await this.callbacks.send(ack);
         this.callbacks.progress(session.transfer.id, session.meter.update(session.bytes, session.transfer.item.size));
       }
       if (event.type === 'transfer.end' && session.transfer.receiverId === this.deviceId) {

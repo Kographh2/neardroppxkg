@@ -45,6 +45,10 @@ See [validation notes](docs/VALIDATION.md) for actual results and remaining depl
 
 ## Production setup
 
+For **Vercel**, follow [the Vercel deployment guide](docs/VERCEL.md). The Next.js API uses PostgreSQL and HTTPS signaling; direct/TURN WebRTC transfers are supported. The custom server's WebSocket file relay is not available in this mode. `npm run test:vercel` exercises real Next route handlers with isolated PostgreSQL and Chrome.
+
+For the persistent Node server:
+
 1. Provision PostgreSQL and set `DATABASE_URL`. Run `npm.cmd run db:migrate` using a migration role. The platform backend requires an owner/BYPASSRLS role with privileges on its private tables; **never expose that credential to clients**. Supabase anon clients cannot access the metadata tables: RLS is enabled with no public policies. The browser uses the versioned API.
 2. Configure a public HTTPS reverse proxy with WebSocket upgrades and `APP_ORIGIN=https://your-domain`. Deploy **one platform instance**. See [deployment](docs/DEPLOYMENT.md) for the supported topology and scaling boundary.
 3. Configure TURN URLs and a coturn REST secret for restrictive networks. Without TURN, failed direct connections use encrypted WebSocket relay. The relay requires both clients to stay connected and does not store files.
@@ -64,7 +68,7 @@ migrations/                     Private server-owned schema
 docs/PROTOCOL.md                 Android-compatible wire and crypto specification
 ```
 
-The custom Node server hosts Next.js, `/api/v1`, and WebSocket upgrades on one origin. Do not replace it with `next start` or deploy it as stateless functions. Essential transfer logic is outside React components.
+The custom Node server hosts Next.js, `/api/v1`, and WebSocket upgrades on one origin. The separate Next route adapter (`server/http-platform.ts`, `server/http-store.ts`) serves stateless deployments using shared PostgreSQL state and HTTPS signaling. Do not mix the two signaling modes in one live deployment. Essential transfer logic is outside React components.
 
 ## Privacy and limits
 

@@ -1,4 +1,6 @@
 import { api, HttpError } from './api';
+import { disconnectedStatus, type ConnectionStatus } from './connection-status';
+import { HttpSignaling } from './http-signaling';
 import { preferences } from './local-preferences';
 import { generateIdentity, type Identity } from '../transfer/crypto';
 import { TransferEngine } from '../transfer/engine';
@@ -8,7 +10,7 @@ import { terminalStates, type ClientEvent, type Device, type DeviceType, type It
 import type { ProgressMeter } from '../transfer/progress';
 export interface QueueItem { id: string; file: Blob; item: ItemMetadata; receiverId: string }
 export interface Snapshot {
-  status: 'starting' | 'online' | 'offline' | 'unsupported' | 'another-tab';
+  status: ConnectionStatus;
   device: Device | null; devices: Device[]; transfers: Transfer[]; queue: QueueItem[];
   requests: { id: string; device: Device; expiresAt: number }[]; received: Record<string, ReceivedContent>;
   error: string | null; notice: string | null;
@@ -24,6 +26,9 @@ export class PlatformClient {
   private progressTime = new Map<string, number>();
   private boot?: Promise<void>;
   private socket?: WebSocket;
+  private http?: HttpSignaling;
+  private signaling: 'http' | 'websocket' = 'websocket';
+  private connecting = false;
   private identity?: Identity;
   private engine?: TransferEngine;
   private retryTimer?: ReturnType<typeof setTimeout>;
@@ -41,9 +46,34 @@ export class PlatformClient {
   error(error: unknown) { this.set({ error: error instanceof Error ? error.message : String(error) }); }
   notify(message: string) { this.set({ notice: message }); }
   clearMessages() { this.set({ error: null, notice: null }); }
-  start() { this.boot ??= this.initialize().catch(error => { this.error(error); this.set({ status: 'offline' }); this.boot = undefined; clearTimeout(this.retryTimer); this.retryTimer = setTimeout(() => { void this.start(); }, 15000); }); return this.boot; }
+  start() {
+    if (!this.lifecycleBound) {
+      this.lifecycleBound = true;
+      window.addEventListener('online', () => { if (this.snapshot.status !== 'another-tab') this.reconnect(); });
+      window.addEventListener('offline', () => {
+        clearTimeout(this.retryTimer); this.http?.close(); this.http=undefined; this.socket?.close();
+        this.engine?.stopAll(); this.set({status:'offline'});
+      });
+      window.addEventListener('beforeunload', event => { if (this.snapshot.transfers.some(t => !terminalStates.includes(t.status))) event.preventDefault(); });
+    }
+    if (!navigator.onLine) { this.set({status:'offline'}); return Promise.resolve(); }
+    this.boot ??= this.initialize().catch(error => {
+      this.error(error); this.set({ status: disconnectedStatus(navigator.onLine) }); this.boot = undefined;
+      clearTimeout(this.retryTimer);
+      // A missing deployment route will not recover by flooding it with requests.
+      if (!(error instanceof HttpError && error.status === 404)) this.retryTimer = setTimeout(() => { void this.start(); }, 15000);
+    }); return this.boot;
+  }
+  reconnect() {
+    clearTimeout(this.retryTimer);
+    if (!navigator.onLine) {this.set({status:'offline'});return;}
+    this.set({status:'starting',error:null});
+    if (!this.boot || !this.engine) {void this.start();return;}
+    this.http?.close();this.http=undefined;
+    void this.connect();
+  }
   private async initialize() {
-    if (!capabilities().crypto || !capabilities().websocket) { this.set({ status: 'unsupported', error: 'Open NearDrop over HTTPS in a modern browser to connect securely.' }); return; }
+    if (!capabilities().crypto) { this.set({ status: 'unsupported', error: 'Open NearDrop over HTTPS in a modern browser to connect securely.' }); return; }
     this.historyAfter = Number(preferences.getItem('nd-history-after') || '0');
     const stored = preferences.getItem('nd-identity');
     try { this.identity = stored ? JSON.parse(stored) as Identity : await generateIdentity(); } catch { this.identity = await generateIdentity(); }
@@ -51,9 +81,11 @@ export class PlatformClient {
     const small = matchMedia('(max-width: 700px)').matches;
     const type: DeviceType = small ? 'phone' : 'laptop';
     const name = preferences.getItem('nd-device-name') || (small ? 'My phone' : 'My computer');
-    const { device } = await api<{ device: Device }>('/devices/register', { name, type, publicKey: this.identity.publicKey });
+    const { device, signaling } = await api<{ device: Device; signaling?: 'http' | 'websocket' }>('/devices/register', { name, type, publicKey: this.identity.publicKey });
+    this.signaling = signaling || 'websocket';
     this.set({ device });
     this.engine = new TransferEngine(this.identity, device.id, () => this.snapshot.devices, {
+      dataChannelAcks: this.signaling === 'http', relayAvailable: this.signaling !== 'http',
       send: event => this.send(event), error: message => this.error(message),
       received: (id, content) => { this.set({ received: { ...this.snapshot.received, [id]: content } }); this.notification('Transfer complete', 'Your item is ready. Open NearDrop to save it.'); },
       progress: (id, progress) => {
@@ -62,42 +94,52 @@ export class PlatformClient {
       }
     });
     void cleanOldIncoming();
-    if (!this.lifecycleBound) {
-      this.lifecycleBound = true;
-      window.addEventListener('online', () => { if (this.snapshot.status !== 'another-tab') void this.connect(); });
-      window.addEventListener('offline', () => { this.socket?.close(); this.set({ status: 'offline' }); });
-      window.addEventListener('beforeunload', event => { if (this.snapshot.transfers.some(t => !terminalStates.includes(t.status))) { event.preventDefault(); } });
-    }
     await this.connect();
   }
   private async connect() {
+    if (!navigator.onLine) {this.set({status:'offline'});return;}
+    if (this.connecting || this.http) return;
     if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) return;
     clearTimeout(this.retryTimer);
+    this.connecting = true;
     try {
+      if (this.signaling === 'http') {
+        const http = new HttpSignaling(event=>this.onEvent(event),error=>{
+          if(this.http!==http)return;
+          this.http=undefined;this.engine?.stopAll();this.error(error);
+          this.set({status:error instanceof HttpError && error.code==='CONNECTION_REPLACED'?'another-tab':disconnectedStatus(navigator.onLine),transfers:this.snapshot.transfers.map(t=>terminalStates.includes(t.status)?t:{...t,status:'failed'})});
+          if(error instanceof HttpError && error.status===401){this.boot=undefined;this.retryTimer=setTimeout(()=>void this.start(),15000);}
+          else if(this.snapshot.status!=='another-tab')this.scheduleReconnect();
+        });
+        this.http=http;
+        try {await http.connect();} catch(error){http.close();this.http=undefined;throw error;}
+        return;
+      }
       const { ticket } = await api<{ ticket: string }>('/ws-ticket', {});
-      const url = new URL('/api/v1/events', location.origin); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('ticket', ticket);
+      const url = new URL('/realtime', location.origin); url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('ticket', ticket);
       const socket = new WebSocket(url); this.socket = socket;
-      socket.onopen = () => { this.backoff = 1000; this.set({ status: 'online', error: null }); clearInterval(this.pingTimer); this.pingTimer = setInterval(() => this.send({ type: 'ping' }), 20000); };
+      socket.onopen = () => { clearInterval(this.pingTimer); this.pingTimer = setInterval(() => this.send({ type: 'ping' }), 20000); };
       socket.onmessage = event => { try { this.onEvent(JSON.parse(event.data) as ServerEvent); } catch (error) { this.error(error); } };
       socket.onclose = event => {
         clearInterval(this.pingTimer); this.engine?.stopAll(); this.socket = undefined;
-        this.set({ status: event.code === 4001 ? 'another-tab' : 'offline', transfers: this.snapshot.transfers.map(t => terminalStates.includes(t.status) ? t : { ...t, status: 'failed' }), error: event.code === 4001 ? 'NearDrop is active in another tab, or you signed out. Reload here to reconnect.' : null });
+        this.set({ status: event.code === 4001 ? 'another-tab' : disconnectedStatus(navigator.onLine), transfers: this.snapshot.transfers.map(t => terminalStates.includes(t.status) ? t : { ...t, status: 'failed' }), error: event.code === 4001 ? 'NearDrop is active in another tab, or you signed out. Reload here to reconnect.' : null });
         if (event.code !== 4001) this.scheduleReconnect();
       };
       socket.onerror = () => socket.close();
     } catch (error) {
-      this.set({ status: 'offline' });
+      this.error(error); this.set({ status: disconnectedStatus(navigator.onLine) });
       if (error instanceof HttpError && error.status === 401) { this.boot = undefined; this.engine?.stopAll(); this.retryTimer = setTimeout(() => { void this.start(); }, 15000); }
-      else this.scheduleReconnect();
-    }
+      else if (!(error instanceof HttpError && error.status === 404)) this.scheduleReconnect();
+    } finally {this.connecting=false;}
   }
-  private scheduleReconnect() { clearTimeout(this.retryTimer); this.retryTimer = setTimeout(() => { void this.connect(); }, this.backoff); this.backoff = Math.min(this.backoff * 2, 15000); }
+  private scheduleReconnect() { clearTimeout(this.retryTimer); if(!navigator.onLine)return; this.retryTimer = setTimeout(() => { void this.connect(); }, this.backoff); this.backoff = Math.min(this.backoff * 2, 15000); }
   private send(event: ClientEvent) {
+    if(this.http) { const sent=this.http.send(event); void sent.catch(()=>undefined); return sent; }
     if (this.socket?.readyState !== WebSocket.OPEN) { this.error('Connection lost. Keep NearDrop open on both devices and try again.'); return; }
     this.socket.send(JSON.stringify(event));
   }
   private onEvent(event: ServerEvent) {
-    if (event.type === 'ready') { this.set({ device: event.device, devices: event.devices, requests: event.requests, transfers: event.transfers }); return; }
+    if (event.type === 'ready') { this.backoff=1000; this.set({ status:'online',error:null,device: event.device, devices: event.devices, requests: event.requests, transfers: event.transfers }); return; }
     if (event.type === 'devices') { this.set({ devices: event.devices }); return; }
     if (event.type === 'pairing.request') { this.set({ requests: [...this.snapshot.requests.filter(r => r.id !== event.id), event] }); this.notification('Connection request', `${event.device.name} wants to connect.`); return; }
     if (event.type === 'pairing.accepted') { this.set({ requests: this.snapshot.requests.filter(r => r.device.id !== event.device.id), notice: `Connected to ${event.device.name}`, pairing: null, pairingRevision: this.snapshot.pairingRevision + 1 }); return; }

@@ -1,12 +1,12 @@
 # Supported production topology
 
-The user's selected web target is **https://neardrops.vercel.app**. See [the Vercel compatibility notes](VERCEL.md): the current custom-server implementation requires adaptation before pairing and relay can run on a standard Vercel deployment. The topology below describes the existing long-running server, not a completed Vercel integration.
+The selected web target is **https://neardrops.vercel.app**. Follow [the Vercel deployment guide](VERCEL.md) for the Next route adapter with PostgreSQL and HTTPS signaling. Direct/TURN WebRTC is supported there; the live WebSocket file relay belongs to the separate long-running Node deployment described below. Local validation is not confirmation of a live Vercel deployment.
 
 ```text
 HTTPS reverse proxy (one public origin)
   └─ one long-running Node 24 NearDrop process
        ├─ Next.js UI
-       ├─ /api/v1 HTTP + /api/v1/events WebSocket
+       ├─ /api/v1 HTTP + /realtime WebSocket (legacy /api/v1/events accepted)
        ├─ PostgreSQL metadata
        ├─ optional Supabase Auth
        └─ STUN / optional coturn (UDP/TCP/TLS reachability)

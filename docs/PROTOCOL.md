@@ -39,13 +39,25 @@ JSON errors: `{error:"Human-readable message"}` with meaningful HTTP 400/401/403
 
 ## Pairing
 
-Codes use six cryptographically random symbols from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`. Hashes, not raw codes, are held in server memory. Hyphens and spaces are ignored; codes expire after five minutes. Each open code can join once and becomes pending; only the initiator can approve. A code alone never establishes a relationship. Per-IP and per-device attempt limits apply. QR contains `https://origin/connect#code=ABCDEF`; the fragment is not part of HTTP requests and is removed from browser history on reading.
+Codes use six cryptographically random symbols from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`. Only their hashes are retained: in process memory for the custom WebSocket server, or PostgreSQL for HTTP signaling. Hyphens and spaces are ignored; codes expire after five minutes. Each open code can join once and becomes pending; only the initiator can approve. A code alone never establishes a relationship. Per-IP and per-device attempt limits apply. QR contains `https://origin/connect#code=ABCDEF`; the fragment is not part of HTTP requests and is removed from browser history on reading.
 
-Pairings deliberately do not survive server restarts. Approved relationships do survive with PostgreSQL. Trust is directional, server-owned, and only available when both devices share a verified account. Trust does not bypass transfer consent in v1.
+HTTP-mode pairings survive function restarts until their expiry. Custom WebSocket server pairings do not survive process restarts. Approved relationships persist with PostgreSQL. Trust is directional, server-owned, and only available when both devices share a verified account. Trust does not bypass transfer consent in v1.
+
+## HTTPS signaling (Vercel)
+
+Registration includes `signaling: "http"` in this mode. If absent, use the legacy WebSocket flow below. Android must select the advertised mode.
+
+1. `POST /session/connect {}` returns `{connectionId,cursor,ready}`. A new connection replaces the previous tab/session and fails unfinished transfers. `ready` is the same server event described below.
+2. `GET /events?connectionId=<uuid>&cursor=<integer>` returns `{events,cursor,devices}`. Poll approximately every 750ms while idle, faster after events. Apply `devices` first, then events in order; advance the cursor only after handling the page. A subsequent poll acknowledges the previous page. Presence expires after 45 seconds without polling. An expired/replaced connection returns 409; do not silently take over a newer tab.
+3. `POST /events {connectionId,event}` submits one validated control event. Serialize sends and await each HTTP response. Do not retry a mutation after an ambiguous network failure; reconnect and retry the transfer with a fresh ID. Browser cookies/native bearer credentials authorize every request.
+4. In HTTP mode, per-chunk `transfer.ack` envelopes travel over the WebRTC DataChannel. The receiver also submits progress checkpoints through HTTPS at most once per second and always after the last chunk. Commit the final checkpoint before sending its DataChannel acknowledgement, so `transfer.complete` cannot overtake it. Empty files have no acknowledgement and complete with zero bytes.
+5. Control events are stored for up to two minutes of delivery eligibility. Event sequence allocation and insertion commit atomically per recipient. Expired metadata is pruned during traffic. No file/chunk contents enter the HTTP inbox. A stopped receiver or expired acceptance window fails the transfer when the remaining device polls.
+
+`GET /ice` returns `relayAvailable:false` in this mode. `direct` and `turn` are available WebRTC transports; the custom server's `relay` transport and `/ws-ticket` are not available. If WebRTC negotiation fails, report failure with a TURN configuration hint. Do not invent a server relay. See [Vercel deployment](VERCEL.md).
 
 ## WebSocket
 
-Connect to `wss://origin/api/v1/events?ticket=...`; the ticket is one use and expires in 30 seconds. Do not log query strings in proxies. Browser Origin is checked. One active socket per device; a second tab replaces the first with close code 4001. Normal reconnection uses a fresh ticket and bounded exponential backoff. WebSocket ping/pong detects dead sockets.
+Connect to `wss://origin/realtime?ticket=...`; the ticket is one use and expires in 30 seconds. The custom Node server also accepts the legacy `/api/v1/events` upgrade and rewrites it internally to avoid a collision with Next's HTTP route. Do not log query strings in proxies. Browser Origin is checked. One active socket per device; a second tab replaces the first with close code 4001. Normal reconnection uses a fresh ticket and bounded exponential backoff. WebSocket ping/pong detects dead sockets.
 
 Server events:
 

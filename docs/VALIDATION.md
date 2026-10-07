@@ -1,4 +1,15 @@
-# Validation record — 2026-10-05–06
+# Validation record
+
+## Vercel adapter and connection status — 2026-10-07
+
+- Added a dynamic Next.js `/api/v1/[...path]` route backed by shared PostgreSQL state. The production build lists it as a dynamic route, not a static asset.
+- 14 unit/API tests passed, including a real PostgreSQL engine (PGlite) in isolated memory: session authorization, origin checks, pairing confirmation/expiry, attempt limits, receiver-only completion, presence expiry, and replacement-session rejection. No production data was used.
+- Two Chrome scenarios passed through the actual Next route handlers: an HTML 404 shows Server unavailable, manual retry recovers, actual browser offline/online events recover, and two guests pair and transfer a 262,153-byte file with identical SHA-256 after download.
+- This validates local HTTP signaling and direct WebRTC. Managed TURN, live Vercel, physical mobile browsers, and live Supabase authentication remain unverified. HTTP mode does not implement the custom Node server's WebSocket file relay.
+- Local DATABASE_URL is now configured, but its connection attempt returns ENOTFOUND, including outside the sandbox. No live database migration was run. The earlier notes below describe the prior environment and are not current configuration claims.
+- Initial verification hit Windows memory allocation failures. PostgreSQL tests passed with the baseline WebAssembly compiler and sequential execution. A single-process Next test server passed browser tests; the production build passed using `NODE_OPTIONS=--max-old-space-size=4096 --max-semi-space-size=4`.
+
+## Earlier validation — 2026-10-05–06
 
 ## Executed successfully
 

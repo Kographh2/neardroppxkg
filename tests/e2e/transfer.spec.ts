@@ -105,7 +105,7 @@ test('initial connection failure retries and blocked local storage does not brea
   await page.addInitScript(() => { Object.defineProperty(window,'localStorage',{get(){throw new DOMException('Storage blocked','SecurityError');}}); });
   let attempts = 0;
   await page.route('**/api/v1/devices/register',async route => { if (++attempts === 1) await route.abort('connectionfailed'); else await route.continue(); });
-  await page.goto('/drop'); await expect(page.getByText('You’re offline',{exact:true})).toBeVisible();
+  await page.goto('/drop'); await expect(page.getByText('Server unavailable',{exact:true}).first()).toBeVisible();
   await expect(page.getByText('You’re online',{exact:true})).toBeVisible({timeout:30000});
   await expect(page.locator('.qr-frame img')).toBeVisible();
 });
