@@ -1,14 +1,14 @@
 import pg from 'pg';
 import type { Device, Pairing, ServerEvent, Transfer } from '../src/shared/protocol';
 import type { Relationship, StoredDevice } from './store';
-import { ApiError, assert } from './security';
+import { assert } from './security';
+import { databasePoolOptions } from './database-config';
 
 let pool: pg.Pool | undefined;
 export function database() {
-  if (!process.env.DATABASE_URL) throw new ApiError(503, 'The NearDrop server needs DATABASE_URL. Configure it in Vercel and run the database migrations.');
+  const options = databasePoolOptions();
   if (!pool) {
-    pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 3, connectionTimeoutMillis: 8000,
-      idleTimeoutMillis: 10000, ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined });
+    pool = new pg.Pool({ ...options, max: 3, connectionTimeoutMillis: 8000, idleTimeoutMillis: 10000 });
     pool.on('error', () => console.error('NearDrop database connection closed. A new connection will be requested.'));
   }
   return pool;

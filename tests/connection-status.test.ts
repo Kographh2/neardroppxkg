@@ -12,6 +12,6 @@ test('HTML 404/503 responses retain meaningful HTTP errors rather than JSON pars
   await assert.rejects(()=>api('/devices/register',{}),e=>e instanceof HttpError && e.status===404 && /API is missing/.test(e.message));
   fetchMock.mock.mockImplementation(async()=>new Response('<html>Unavailable</html>',{status:503}));
   await assert.rejects(()=>api('/devices/register',{}),e=>e instanceof HttpError && e.status===503 && /not ready/.test(e.message));
-  fetchMock.mock.mockImplementation(async()=>new Response(JSON.stringify({error:'Database is not configured.'}),{status:503}));
-  await assert.rejects(()=>api('/devices/register',{}),/Database is not configured/);
+  fetchMock.mock.mockImplementation(async()=>new Response(JSON.stringify({error:'Database is not configured.',code:'DATABASE_NOT_CONFIGURED',retryable:false}),{status:503}));
+  await assert.rejects(()=>api('/devices/register',{}),e=>e instanceof HttpError && e.code==='DATABASE_NOT_CONFIGURED' && e.retryable===false);
 });

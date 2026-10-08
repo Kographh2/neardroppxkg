@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { databasePoolOptions } from './database-config';
 import type { Device, Pairing, Transfer } from '../src/shared/protocol';
 export interface StoredDevice extends Device { tokenHash: string; expiresAt: number }
 export interface Relationship { a: string; b: string; trustedBy: string[] }
@@ -11,12 +12,12 @@ export class Store {
   relationshipKey(a: string, b: string) { return [a, b].sort().join(':'); }
   related(a: string, b: string) { return this.relationships.has(this.relationshipKey(a, b)); }
   async init() {
-    if (!process.env.DATABASE_URL) {
+    if (!process.env.DATABASE_URL && !process.env.POSTGRES_URL) {
       if (process.env.NODE_ENV === 'production') throw new Error('DATABASE_URL is required in production. Run npm run db:migrate first.');
       console.info('NearDrop: development guest state is ephemeral. Configure DATABASE_URL for persistence.');
       return;
     }
-    this.pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined, max: 10 });
+    this.pool = new pg.Pool({ ...databasePoolOptions(), max: 10 });
     const devices = await this.pool.query<{ data: StoredDevice }>('select data from devices where expires_at > now()');
     for (const { data } of devices.rows) this.devices.set(data.id, { ...data, online: false });
     const relationships = await this.pool.query<{ data: Relationship }>('select data from device_relationships');

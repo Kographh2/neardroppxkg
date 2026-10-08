@@ -1,5 +1,17 @@
 # Validation record
 
+## Production configuration repair — 2026-10-08
+
+- Confirmed the live Vercel health endpoint returned HTTP 503 with `Production APP_ORIGIN must use HTTPS`.
+- Identified the local HTTP APP_ORIGIN and duplicated DATABASE_URL assignment, repaired them, and added production origin resolution plus safe URL normalization.
+- Retrieved the public Supabase CA from the download URL in official Supabase Studio source; enabled strict certificate and hostname verification for Supabase PostgreSQL and pooler hosts. This resolved the subsequent SELF_SIGNED_CERT_IN_CHAIN failure without disabling TLS verification.
+- Connected to the actual configured Supabase database. Migration 001 was present, migration 002 was missing. Applied the additive migrations successfully.
+- `scripts/verify-backend.ts` passed health, registration, session creation, pairing approval, and online presence against the live database. It removed only the two device IDs created for verification afterward.
+- All 22 Node tests passed, including the exact production HTTP-origin regression, TLS configuration, missing-schema diagnostics, and authorization checks.
+- All three Chrome scenarios for Next route handlers passed: missing API recovery, non-retryable configuration failure/manual recovery, and real encrypted WebRTC transfer with matching SHA-256.
+- The production build passed with strict TypeScript and generated the dynamic `/api/v1/[...path]` route.
+- Public Vercel runtime verification is recorded separately after deployment. Local configuration changes alone do not deploy application code.
+
 ## Vercel adapter and connection status — 2026-10-07
 
 - Added a dynamic Next.js `/api/v1/[...path]` route backed by shared PostgreSQL state. The production build lists it as a dynamic route, not a static asset.

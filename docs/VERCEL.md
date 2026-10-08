@@ -2,6 +2,17 @@
 
 Public origin: **https://neardrops.vercel.app**.
 
+## Configuration repair — 2026-10-08
+
+The reported production failure had multiple causes: an HTTP APP_ORIGIN, a database URL pasted with a duplicated `DATABASE_URL=` prefix, the missing Supabase root CA, and the missing HTTP-signaling migration. These have been repaired in code and the local configuration. The configured live database now has both migrations; real registration, pairing and presence checks passed, with verification devices removed afterward.
+
+- Production origin resolution accepts an explicit public HTTPS APP_ORIGIN, official Vercel system domains, or this project's fixed HTTPS default. It never builds the allowlist from a request Host/Origin header. Stale HTTP/localhost values no longer take the entire API down.
+- Database URL loading accepts the URI or a copied dotenv assignment. `POSTGRES_URL` is supported when DATABASE_URL is absent.
+- Supabase database/pooler connections use the official public CA bundled in `server/certificates/supabase-root.json`, with certificate and hostname verification enabled. `DATABASE_CA_CERT` can supply an updated provider CA. The certificate download source is defined by [Supabase Studio](https://github.com/supabase/supabase/blob/master/apps/studio/hooks/custom-content/custom-content.json); this is a public certificate, not a private key.
+- Database failures now distinguish missing/invalid URL, DNS, authentication, TLS, missing tables, and permissions. Configuration failures do not trigger endless automatic retries; use Try again after fixing them.
+
+Deploy these new files to Vercel. Local `.env` corrections do not update the Vercel dashboard. The normalization and bundled CA also apply to existing deployed values after redeployment; keeping APP_ORIGIN set to `https://neardrops.vercel.app` and DATABASE_URL set to only its URI is still recommended.
+
 The Next.js route at `src/app/api/v1/[...path]/route.ts` now serves the API on Vercel. Registration, pairing, presence, rate limits, signaling messages, and transfer metadata use PostgreSQL shared state. No VPS or persistent Node process is required for this deployment mode.
 
 ## Fix the current deployment
@@ -21,7 +32,7 @@ The Next.js route at `src/app/api/v1/[...path]/route.ts` now serves the API on V
 5. Open `https://neardrops.vercel.app/api/v1/health`. Expect JSON containing `status: "ok"`, `persistent: true`, and `signaling: "http"`. A 503 means the route exists but database/origin setup is incomplete. A 404 means the new API route has not been deployed.
 6. Open `/drop` and press **Try again** if necessary. Test pairing on two devices, accept a file, and compare the received file. The online label appears only after the server session handshake succeeds.
 
-For the configuration inspected locally on 2026-10-07, the database connection failed with `ENOTFOUND`. Its hostname could not be resolved from this machine; the correct production credentials and Supabase project status still need verification. No production database migration or deployment was performed by the local tests.
+The earlier ENOTFOUND diagnosis on 2026-10-07 was superseded by the 2026-10-08 configuration repair above. Deployment of the new code is a separate step from the now-completed live database migration.
 
 References: [Supabase connection methods](https://supabase.com/docs/guides/database/connecting-to-postgres), [Vercel environment variables](https://vercel.com/docs/environment-variables).
 

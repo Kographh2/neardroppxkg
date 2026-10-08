@@ -61,7 +61,7 @@ export class PlatformClient {
       this.error(error); this.set({ status: disconnectedStatus(navigator.onLine) }); this.boot = undefined;
       clearTimeout(this.retryTimer);
       // A missing deployment route will not recover by flooding it with requests.
-      if (!(error instanceof HttpError && error.status === 404)) this.retryTimer = setTimeout(() => { void this.start(); }, 15000);
+      if (!(error instanceof HttpError && (error.status === 404 || error.retryable === false))) this.retryTimer = setTimeout(() => { void this.start(); }, 15000);
     }); return this.boot;
   }
   reconnect() {
@@ -109,7 +109,7 @@ export class PlatformClient {
           this.http=undefined;this.engine?.stopAll();this.error(error);
           this.set({status:error instanceof HttpError && error.code==='CONNECTION_REPLACED'?'another-tab':disconnectedStatus(navigator.onLine),transfers:this.snapshot.transfers.map(t=>terminalStates.includes(t.status)?t:{...t,status:'failed'})});
           if(error instanceof HttpError && error.status===401){this.boot=undefined;this.retryTimer=setTimeout(()=>void this.start(),15000);}
-          else if(this.snapshot.status!=='another-tab')this.scheduleReconnect();
+          else if(this.snapshot.status!=='another-tab' && !(error instanceof HttpError && error.retryable===false))this.scheduleReconnect();
         });
         this.http=http;
         try {await http.connect();} catch(error){http.close();this.http=undefined;throw error;}
@@ -129,7 +129,7 @@ export class PlatformClient {
     } catch (error) {
       this.error(error); this.set({ status: disconnectedStatus(navigator.onLine) });
       if (error instanceof HttpError && error.status === 401) { this.boot = undefined; this.engine?.stopAll(); this.retryTimer = setTimeout(() => { void this.start(); }, 15000); }
-      else if (!(error instanceof HttpError && error.status === 404)) this.scheduleReconnect();
+      else if (!(error instanceof HttpError && (error.status === 404 || error.retryable === false))) this.scheduleReconnect();
     } finally {this.connecting=false;}
   }
   private scheduleReconnect() { clearTimeout(this.retryTimer); if(!navigator.onLine)return; this.retryTimer = setTimeout(() => { void this.connect(); }, this.backoff); this.backoff = Math.min(this.backoff * 2, 15000); }

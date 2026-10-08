@@ -6,7 +6,7 @@ import { Platform } from './platform';
 import { Store } from './store';
 import { hash } from './security';
 nextEnv.loadEnvConfig(process.cwd());
-if (process.env.NEARDROP_TEST_EPHEMERAL === '1' && process.env.NODE_ENV !== 'production') delete process.env.DATABASE_URL;
+if (process.env.NEARDROP_TEST_EPHEMERAL === '1' && process.env.NODE_ENV !== 'production') {delete process.env.DATABASE_URL;delete process.env.POSTGRES_URL;}
 const dev = process.env.NODE_ENV !== 'production';
 const port = Number(process.env.PORT || 3000);
 const origin = process.env.APP_ORIGIN || `http://localhost:${port}`;

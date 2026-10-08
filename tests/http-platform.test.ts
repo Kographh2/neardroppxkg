@@ -70,3 +70,25 @@ test('Vercel HTTP API persists pairing and enforces sessions, CSRF, transfer con
     assert.equal((await request('/devices',a.token)).status,401);
   } finally {await database.close();}
 });
+
+test('production registration tolerates the reported HTTP APP_ORIGIN and keeps secure cookies and origin checks',async()=>{
+  const db=await testPostgres();
+  const previous={NODE_ENV:process.env.NODE_ENV,APP_ORIGIN:process.env.APP_ORIGIN,VERCEL:process.env.VERCEL,VERCEL_PROJECT_PRODUCTION_URL:process.env.VERCEL_PROJECT_PRODUCTION_URL};
+  Object.assign(process.env,{NODE_ENV:'production',APP_ORIGIN:'http://neardrops.vercel.app',VERCEL:'1',VERCEL_PROJECT_PRODUCTION_URL:'neardrops.vercel.app'});
+  try {
+    const input={name:'Production browser',type:'phone',publicKey:(await generateIdentity()).publicKey};
+    const register=(origin:string)=>handleHttp(new Request('https://neardrops.vercel.app/api/v1/devices/register',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify(input)}));
+    const response=await register('https://neardrops.vercel.app');
+    assert.equal(response.status,201);assert.match(response.headers.get('set-cookie')||'',/; Secure/);
+    assert.equal((await register('https://attacker.example')).status,403);
+    assert.equal((await register('http://neardrops.vercel.app')).status,403);
+    const health=await handleHttp(new Request('https://neardrops.vercel.app/api/v1/health'));assert.equal(health.status,200);
+    const result=await health.json();assert.equal(result.origin,'https://neardrops.vercel.app');
+    await db.db.exec('DROP TABLE nd_rate_limits');
+    const missing=await register('https://neardrops.vercel.app');assert.equal(missing.status,503);
+    const problem=await missing.json();assert.equal(problem.code,'DATABASE_SCHEMA_MISSING');assert.equal(problem.retryable,false);
+  } finally {
+    for(const [key,value]of Object.entries(previous)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+    await db.close();
+  }
+});

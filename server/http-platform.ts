@@ -4,6 +4,8 @@ import { CHUNK_SIZE, PAIRING_TTL, createTransferSchema, joinSchema, registerSche
 import { ApiError, assert, hash, pairingCode, secret } from './security';
 import { database, HttpStore, rateLimit, transaction } from './http-store';
 import type { StoredDevice } from './store';
+import { deploymentOrigins } from './deployment-origin';
+import { backendFailure } from './backend-error';
 
 const uuid = z.uuid();
 const connectionSchema = z.object({ connectionId: uuid, event: signalSchema }).strict();
@@ -27,13 +29,6 @@ async function body(request: Request): Promise<unknown> {
     while (true) { const {done,value}=await reader.read(); if(done) break; length+=value.length; assert(length<=65536,413,'Request is too large.'); chunks.push(value); }
     try { return JSON.parse(Buffer.concat(chunks).toString() || '{}') as unknown; } catch { throw new ApiError(400,'Invalid JSON request.'); }
   } finally { await reader.cancel(); reader.releaseLock(); }
-}
-function origin(request: Request) {
-  const configured=process.env.APP_ORIGIN;
-  assert(configured || process.env.NODE_ENV !== 'production',503,'Set APP_ORIGIN to your NearDrop HTTPS address in Vercel.');
-  const value=configured || new URL(request.url).origin;
-  assert(process.env.NODE_ENV !== 'production' || value.startsWith('https://'),503,'Production APP_ORIGIN must use HTTPS.');
-  return new URL(value).origin;
 }
 async function authorized(store: HttpStore, request: Request) {
   const value=token(request); assert(value,401,'Your device session expired. Reconnect to continue.'); return store.authenticate(hash(value));
@@ -98,16 +93,16 @@ async function message(store: HttpStore, device: StoredDevice, input: z.infer<ty
 export async function handleHttp(request: Request): Promise<Response> {
   try {
     const url=new URL(request.url), path=url.pathname.replace(/^\/api\/v1/,''), method=request.method;
-    const appOrigin=origin(request);
+    const origins=deploymentOrigins(request.url);
     if(method!=='GET') {
       const native=!request.headers.get('origin') && request.headers.get('x-neardrop-client')==='native' && !!request.headers.get('authorization');
       const registeringNative=path==='/devices/register' && !request.headers.get('origin') && request.headers.get('x-neardrop-client')==='native';
-      assert(request.headers.get('origin')===appOrigin || native || registeringNative,403,'Request origin is not allowed.');
+      assert(origins.allowed.includes(request.headers.get('origin') || '') || native || registeringNative,403,'Request origin is not allowed. Set APP_ORIGIN to the exact public HTTPS address of this deployment.');
       assert(request.headers.get('content-type')?.startsWith('application/json'),415,'Use application/json.');
     }
     if(path==='/health' && method==='GET') {
       await database().query('SELECT device_id FROM nd_presence LIMIT 0');
-      return json({status:'ok',version:1,persistent:true,signaling:'http',relay:false});
+      return json({status:'ok',version:1,persistent:true,signaling:'http',relay:false,origin:origins.canonical});
     }
     // Vercel sets this header; never trust arbitrary forwarding headers elsewhere.
     const ip=process.env.VERCEL ? request.headers.get('x-vercel-forwarded-for') || 'unknown' : 'local';
@@ -125,7 +120,7 @@ export async function handleHttp(request: Request): Promise<Response> {
         const device:StoredDevice={id:randomUUID(),...input,userId:null,online:false,lastSeen:new Date().toISOString(),tokenHash:hash(session),expiresAt:Date.now()+30*86400000};
         await store.saveDevice(device);
         return json({device:store.visible(device),signaling:'http',...(request.headers.get('x-neardrop-client')==='native'?{token:session}:{})},201,
-          {'Set-Cookie':`nd_session=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${appOrigin.startsWith('https:')?'; Secure':''}`});
+          {'Set-Cookie':`nd_session=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${origins.secure?'; Secure':''}`});
       });
     }
     const device=await transaction(store=>authorized(store,request));
@@ -216,7 +211,7 @@ export async function handleHttp(request: Request): Promise<Response> {
         await store.sql.query('DELETE FROM device_relationships WHERE device_a=$1 OR device_b=$1',[current.id]);
         await store.sql.query('DELETE FROM nd_presence WHERE device_id=$1',[current.id]);
         await store.saveDevice({...current,userId:null,expiresAt:Date.now(),online:false});
-        return json({ok:true},200,{'Set-Cookie':`nd_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${appOrigin.startsWith('https:')?'; Secure':''}`});
+        return json({ok:true},200,{'Set-Cookie':`nd_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${origins.secure?'; Secure':''}`});
       }
       if(path==='/pairing/create' && method==='POST') {
         await store.lockDevices([current.id]);
@@ -283,6 +278,7 @@ export async function handleHttp(request: Request): Promise<Response> {
     // Never leak database URLs, credentials, SQL, or stack traces to clients/logs.
     const code=error && typeof error==='object' && 'code' in error?String(error.code):'unknown';
     console.error('NearDrop backend unavailable:', /^[A-Z0-9_]{1,24}$/.test(code)?code:'unknown');
-    return json({error:'The NearDrop backend is unavailable. Check DATABASE_URL and run the database migrations, then try again.'},503);
+    const failure=backendFailure(error);
+    return json({error:failure.message,code:failure.code,retryable:failure.retryable},503);
   }
 }

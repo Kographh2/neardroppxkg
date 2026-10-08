@@ -19,6 +19,20 @@ test('missing API is not offline; manual retry recovers; real network offline re
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
 });
 
+test('permanent configuration errors stop automatic retries and manual retry can recover',async({page})=>{
+  await page.clock.install();let broken=true,attempts=0;
+  await page.route('**/api/v1/devices/register',async route=>{
+    attempts++;
+    if(broken)await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'The database tables are not ready.',code:'DATABASE_SCHEMA_MISSING',retryable:false})});
+    else await route.continue();
+  });
+  await page.goto('/drop');await expect(page.locator('.online-label')).toHaveText('Server unavailable');
+  await expect(page.getByText('The database tables are not ready.')).toBeVisible();
+  await page.clock.fastForward(31000);expect(attempts).toBe(1);
+  broken=false;await page.getByRole('button',{name:'Try again',exact:true}).click();
+  await expect(page.locator('.online-label')).toHaveText('You’re online');
+});
+
 test('Next route handlers pair two guests and transfer exact file bytes with HTTP signaling',async({browser})=>{
   const a=await browser.newContext(),b=await browser.newContext({acceptDownloads:true});
   const sender=await a.newPage(),receiver=await b.newPage();
