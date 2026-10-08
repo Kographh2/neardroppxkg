@@ -16,7 +16,8 @@ const platform = new Platform(store, origin);
 const app = next({ dev, hostname: '0.0.0.0', port }); await app.prepare();
 const handler = app.getRequestHandler();
 const server = createServer((req, res) => {
-  if (req.url?.startsWith('/api/v1/')) void platform.handle(req, res);
+  if (req.url?.startsWith('/api/v1/chat/')) void handler(req, res);
+  else if (req.url?.startsWith('/api/v1/')) void platform.handle(req, res);
   else void handler(req, res);
 });
 server.requestTimeout = 30000;

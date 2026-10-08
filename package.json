@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch server/index.ts",
-    "build": "next build",
+    "build": "node scripts/android-releases.mjs && next build",
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --liftoff-only --import tsx --test --test-concurrency=1 tests/*.test.ts",

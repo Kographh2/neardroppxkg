@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import './features.css';
 export const metadata: Metadata = {
   title: { default: 'NearDrop — Move anything. Anywhere.', template: '%s · NearDrop' },
   description: 'Fast, private transfers between your devices. No cables. No complicated setup.',

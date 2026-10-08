@@ -46,13 +46,51 @@ test('Next route handlers pair two guests and transfer exact file bytes with HTT
     await sender.getByRole('dialog').getByRole('button',{name:'Connect',exact:true}).click();
     await expect(sender.locator('.connected-summary')).toBeVisible();
     await expect(receiver.locator('.connected-summary')).toBeVisible();
-    const bytes=randomBytes(262153);
+    // Reproduce WAN signaling latency that used to exceed the 8-second budget.
+    test.setTimeout(180000);
+    await sender.route('**/api/v1/events',async route=>{
+      if(route.request().method()==='POST' && route.request().postDataJSON()?.event?.description?.type==='offer') await new Promise(resolve=>setTimeout(resolve,9000));
+      await route.continue();
+    });
+    const bytes=randomBytes(2*1024*1024+9);
     await sender.getByLabel('Choose files to send').setInputFiles({name:'vercel-proof.bin',mimeType:'application/octet-stream',buffer:bytes});
     await receiver.getByRole('button',{name:'Accept',exact:true}).click();
+    await expect(receiver.getByRole('link',{name:'Save file',exact:true})).toBeVisible({timeout:60000});
     const downloaded=receiver.waitForEvent('download');await receiver.getByRole('link',{name:'Save file',exact:true}).click();
     const received=await readFile((await (await downloaded).path())!);
     expect(createHash('sha256').update(received).digest('hex')).toBe(createHash('sha256').update(bytes).digest('hex'));
     await expect(sender.getByText('Sent',{exact:true})).toBeVisible();
+    await sender.getByRole('navigation',{name:'Main navigation',exact:true}).getByRole('link',{name:'Chat',exact:true}).click();
+    await receiver.getByRole('navigation',{name:'Main navigation',exact:true}).getByRole('link',{name:'Chat',exact:true}).click();
+    for(const [page,code] of [[sender,'alice-secret-phrase'],[receiver,'bob-secret-phrase']] as const) {
+      await page.getByRole('button',{name:'Set private code',exact:true}).click();
+      await page.getByRole('dialog').getByLabel('Private code',{exact:true}).fill(code);
+      await page.getByRole('dialog').getByLabel('Confirm private code',{exact:true}).fill(code);
+      await page.getByRole('button',{name:'Save private code',exact:true}).click();
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+    }
+    const secret='A private message that must never appear in the chat list';
+    await expect(sender.getByLabel('Message',{exact:true})).toBeEnabled();
+    await sender.getByLabel('Message',{exact:true}).fill(secret);
+    await sender.getByLabel('Private code to send',{exact:true}).fill('alice-secret-phrase');
+    await sender.getByRole('button',{name:'Send privately',exact:true}).click();
+    await expect(receiver.locator('.cipher-message')).toHaveCount(1);
+    await expect(receiver.getByText(secret,{exact:true})).toHaveCount(0);
+    await receiver.locator('.cipher-message').click();
+    await receiver.getByRole('dialog').getByLabel('Private code',{exact:true}).fill('incorrect-code');
+    await receiver.getByRole('button',{name:'Unlock message',exact:true}).click();
+    await expect(receiver.getByRole('dialog').getByRole('alert')).toContainText('Incorrect private code');
+    await receiver.getByRole('dialog').getByLabel('Private code',{exact:true}).fill('bob-secret-phrase');
+    await receiver.getByRole('button',{name:'Unlock message',exact:true}).click();
+    await expect(receiver.locator('.private-message')).toHaveText(secret);
+    await receiver.getByRole('button',{name:'Close & lock',exact:true}).click();
+    await expect(receiver.getByText(secret,{exact:true})).toHaveCount(0);
+    await receiver.locator('.cipher-message').click();
+    await expect(receiver.getByRole('button',{name:'Unlock message',exact:true})).toBeVisible();
+    await expect(receiver.getByText(secret,{exact:true})).toHaveCount(0);
+    await receiver.getByRole('button',{name:'Close dialog',exact:true}).click();
+    await receiver.setViewportSize({width:320,height:720});
+    expect(await receiver.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
     expect(errors).toEqual([]);
   } finally {await a.close();await b.close();}
 });

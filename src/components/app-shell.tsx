@@ -9,8 +9,9 @@ import { PairingPanel } from './pairing';
 import { usePlatform } from '@/lib/hooks';
 import { platform } from '@/lib/platform-client';
 import { preferences } from '@/lib/local-preferences';
+import { MessageSquare } from 'lucide-react';
 import { connectionHints, connectionLabels } from '@/lib/connection-status';
-const navigation = [{ href: '/drop', label: 'Transfer', Icon: ArrowUpRight }, { href: '/devices', label: 'Devices', Icon: MonitorSmartphone }, { href: '/history', label: 'History', Icon: Clock3 }];
+const navigation = [{ href: '/drop', label: 'Transfer', Icon: ArrowUpRight }, { href: '/chat', label: 'Chat', Icon: MessageSquare }, { href: '/devices', label: 'Devices', Icon: MonitorSmartphone }, { href: '/history', label: 'History', Icon: Clock3 }];
 export function ThemeButton() {
   const [dark, setDark] = useState(false);
   useEffect(() => setDark(document.documentElement.dataset.theme === 'dark'), []);

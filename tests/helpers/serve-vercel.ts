@@ -6,6 +6,9 @@ import { testPostgres } from './postgres';
 // custom API interception and no connection to the user's configured database.
 await testPostgres();
 process.env.APP_ORIGIN='http://localhost:3118';
+// Local API tests exercise P2P without spending production TURN allocations.
+process.env.CLOUDFLARE_TURN_KEY_ID='';process.env.CLOUDFLARE_TURN_API_TOKEN='';
+process.env.TURN_URLS='';process.env.TURN_SECRET='';
 const app=next({dev:true,hostname:'localhost',port:3118});
 await app.prepare();
 const handle=app.getRequestHandler();

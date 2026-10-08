@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { testPostgres } from './helpers/postgres';
 import { handleHttp } from '../server/http-platform';
 import { generateIdentity } from '../src/transfer/crypto';
+import { sealMessage } from '../src/chat/crypto';
+import type { ChatMessage } from '../src/shared/chat';
 import type { Device, ServerEvent, Transfer } from '../src/shared/protocol';
 
 test('Vercel HTTP API persists pairing and enforces sessions, CSRF, transfer consent and receiver completion',async()=>{
@@ -32,6 +34,19 @@ test('Vercel HTTP API persists pairing and enforces sessions, CSRF, transfer con
     const metadata={receiverId:b.device.id,item:{name:'hello.txt',size:12,mime:'text/plain',kind:'file'}};
     assert.equal((await request('/transfers',a.token,metadata)).status,403);
     assert.equal((await request('/pairing/confirm',a.token,{id:p.body.id})).status,200);
+    const aliceChat=await generateIdentity(),bobChat=await generateIdentity();
+    assert.equal((await request('/chat/key',a.token,{publicKey:aliceChat.publicKey})).status,200);
+    assert.equal((await request('/chat/key',b.token,{publicKey:bobChat.publicKey})).status,200);
+    assert.equal((await request('/chat/key',a.token,{publicKey:bobChat.publicKey})).status,409);
+    const envelope=await sealMessage(aliceChat,a.device.id,b.device.id,bobChat.publicKey,'private contents');
+    assert.equal((await request('/chat/messages',c.token,envelope)).status,403);
+    assert.equal((await request('/chat/messages',a.token,envelope)).status,200);
+    assert.equal((await request('/chat/messages',a.token,envelope)).status,200);
+    const chat=await request<{messages:ChatMessage[]}>(`/chat/messages?peer=${a.device.id}`,b.token);
+    assert.equal(chat.body.messages.length,1);assert.equal(JSON.stringify(chat.body).includes('private contents'),false);
+    assert.equal((await request(`/chat/messages?peer=${a.device.id}`,c.token)).status,403);
+    await database.db.query("UPDATE nd_chat_messages SET expires_at=now()-interval '1 second'");
+    assert.equal((await request<{messages:ChatMessage[]}>(`/chat/messages?peer=${a.device.id}`,b.token)).body.messages.length,0);
     assert.equal((await request('/pairing/join',c.token,{code:p.body.code})).status,400);
     assert.equal((await request(`/devices/${b.device.id}/trust`,a.token,{trusted:true})).status,403);
     const transfer=await request<{transfer:Transfer}>('/transfers',a.token,metadata);assert.equal(transfer.status,201);const id=transfer.body.transfer.id;
@@ -49,6 +64,7 @@ test('Vercel HTTP API persists pairing and enforces sessions, CSRF, transfer con
     assert.equal((await event(b,sessionB.connectionId,{type:'transfer.ack',transferId:id,sequence:0,bytes:12})).status,200);
     assert.equal((await event(b,sessionB.connectionId,{type:'transfer.complete',transferId:id})).status,200);
     assert.equal((await request<{transfer:Transfer}>(`/transfers/${id}`,a.token)).body.transfer.status,'completed');
+    assert.equal((await event(a,sessionA.connectionId,{type:'signal',transferId:id,candidate:{candidate:'late ICE'}})).status,200);
     const expired=await request<{id:string;code:string}>('/pairing/create',a.token,{});
     await database.db.query("UPDATE nd_pairings SET expires_at=now()-interval '1 second' WHERE id=$1",[expired.body.id]);
     assert.equal((await request('/pairing/join',b.token,{code:expired.body.code})).status,400);

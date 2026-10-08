@@ -3,12 +3,14 @@ import { deriveTransferKey, decryptChunk, encryptChunk, type Identity } from './
 import { createSink, type ReceiveSink, type ReceivedContent } from './receive-sink';
 import { ProgressMeter } from './progress';
 import { api } from '../lib/api';
+import { SendWindow } from './send-window';
 
 interface Session {
   transfer: Transfer; key: Promise<CryptoKey>; pc?: RTCPeerConnection; channel?: RTCDataChannel;
   sink?: ReceiveSink; sequence: number; bytes: number; meter: ProgressMeter;
   candidates: RTCIceCandidateInit[]; aborted: boolean; started: boolean;
-  ack?: { sequence: number; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
+  window: SendWindow;
+  checkpoint?: Promise<void>;
   chain: Promise<void>; checkpointAt: number;
 }
 interface EngineCallbacks {
@@ -29,7 +31,7 @@ export class TransferEngine {
     if (!session) {
       const peer = this.peers().find(d => d.id === (t.senderId === this.deviceId ? t.receiverId : t.senderId));
       if (!peer) throw new Error('The other device is no longer paired.');
-      session = { transfer: t, key: deriveTransferKey(this.identity, peer.publicKey, t.id), sequence: 0, bytes: 0, meter: new ProgressMeter(), candidates: [], aborted: false, started: false, chain: Promise.resolve(), checkpointAt: 0 };
+      session = { transfer: t, key: deriveTransferKey(this.identity, peer.publicKey, t.id), sequence: 0, bytes: 0, meter: new ProgressMeter(), candidates: [], aborted: false, started: false, chain: Promise.resolve(), checkpointAt: 0, window: new SendWindow(this.callbacks.dataChannelAcks ? 16 : 1) };
       this.sessions.set(t.id, session);
     }
     session.transfer = t; return session;
@@ -56,7 +58,7 @@ export class TransferEngine {
     const { iceServers } = await api<{ iceServers: RTCIceServer[] }>('/ice');
     if (session.aborted) throw new Error('Transfer cancelled.');
     const pc = new RTCPeerConnection({ iceServers }); session.pc = pc;
-    pc.onicecandidate = event => { if (event.candidate && !session.aborted) this.callbacks.send({ type: 'signal', transferId: session.transfer.id, candidate: { ...event.candidate.toJSON(), candidate: event.candidate.candidate } }); };
+    pc.onicecandidate = event => { if (event.candidate && !session.aborted) void Promise.resolve(this.callbacks.send({ type: 'signal', transferId: session.transfer.id, candidate: { ...event.candidate.toJSON(), candidate: event.candidate.candidate } })).catch(error => this.fail(session, error)); };
     pc.ondatachannel = event => this.bindChannel(session, event.channel);
     pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState) && ['direct', 'turn'].includes(session.transfer.transport || '') && !session.aborted) this.fail(session, new Error('Connection lost. Retry this transfer.')); };
     return pc;
@@ -81,20 +83,20 @@ export class TransferEngine {
         const pc = await this.peerConnection(session);
         const channel = pc.createDataChannel('neardrop-v1', { ordered: true }); this.bindChannel(session, channel);
         const opened = new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => { cleanup(); reject(new Error('Connection timeout')); }, 8000);
+          const timeout = setTimeout(() => { cleanup(); reject(new Error('Connection timeout')); }, 60000);
           const onOpen = () => { cleanup(); resolve(); }; const onError = () => { cleanup(); reject(new Error('Connection failed')); };
-          const cleanup = () => { clearTimeout(timeout); channel.removeEventListener('open', onOpen); channel.removeEventListener('error', onError); };
-          channel.addEventListener('open', onOpen); channel.addEventListener('error', onError);
+          const cleanup = () => { clearTimeout(timeout); channel.removeEventListener('open', onOpen); channel.removeEventListener('error', onError); channel.removeEventListener('close', onError); };
+          channel.addEventListener('open', onOpen); channel.addEventListener('error', onError); channel.addEventListener('close', onError);
         });
         // Attach rejection immediately while SDP is being prepared.
         void opened.catch(() => undefined);
         await pc.setLocalDescription(await pc.createOffer());
-        this.callbacks.send({ type: 'signal', transferId: session.transfer.id, description: { type: 'offer', sdp: pc.localDescription!.sdp } });
+        await this.callbacks.send({ type: 'signal', transferId: session.transfer.id, description: { type: 'offer', sdp: pc.localDescription!.sdp } });
         await opened;
         transport = 'direct';
         const stats = await pc.getStats();
         stats.forEach(report => { if (report.type === 'transport' && report.selectedCandidatePairId) { const pair = stats.get(report.selectedCandidatePairId); const candidate = pair && stats.get(pair.localCandidateId); const remote = pair && stats.get(pair.remoteCandidateId); if (candidate?.candidateType === 'relay' || remote?.candidateType === 'relay') transport = 'turn'; } });
-      } catch { session.pc?.close(); session.pc = undefined; session.channel = undefined; }
+      } catch (error) { if (!session.pc) throw error; session.pc.close(); session.pc = undefined; session.channel = undefined; }
     }
     if (session.aborted) return;
     if (transport === 'relay' && this.callbacks.relayAvailable === false) throw new Error('Could not establish a direct connection. Try the same Wi-Fi network, or ask the site owner to configure a TURN service.');
@@ -102,23 +104,25 @@ export class TransferEngine {
     await this.callbacks.send({ type: 'transfer.transport', transferId: session.transfer.id, transport });
     for (let offset = 0, sequence = 0; offset < file.size; offset += CHUNK_SIZE, sequence++) {
       if (session.aborted) return;
+      await session.window.room();
       const data = await encryptChunk(await session.key, sequence, await file.slice(offset, offset + CHUNK_SIZE).arrayBuffer(), session.transfer.id);
       if (session.aborted) return;
-      const acknowledged = new Promise<void>((resolve, reject) => { session.ack = { sequence, resolve, reject, timer: setTimeout(() => reject(new Error('The other device stopped responding. Retry this transfer.')), 20000) }; });
+      session.window.track(sequence);
       const event: ClientEvent = { type: 'transfer.chunk', transferId: session.transfer.id, sequence, data };
-      if (transport !== 'relay' && session.channel?.readyState === 'open') session.channel.send(JSON.stringify(event)); else if (transport === 'relay') this.callbacks.send(event); else throw new Error('Connection lost. Retry this transfer.');
-      await acknowledged;
-      session.bytes = Math.min(offset + CHUNK_SIZE, file.size);
-      this.callbacks.progress(session.transfer.id, session.meter.update(session.bytes, file.size));
+      if (transport !== 'relay' && session.channel?.readyState === 'open') session.channel.send(JSON.stringify(event)); else if (transport === 'relay') await this.callbacks.send(event); else throw new Error('Connection lost. Retry this transfer.');
     }
     // End travels over the ordered signaling stream after the final acknowledgement.
-    this.callbacks.send({ type: 'transfer.end', transferId: session.transfer.id });
+    await session.window.drain();
+    if (!session.aborted) await this.callbacks.send({ type: 'transfer.end', transferId: session.transfer.id });
   }
   handle(event: ClientEvent) {
     if (!('transferId' in event)) return;
     const session = this.sessions.get(event.transferId); if (!session || session.aborted) return;
     if (event.type === 'transfer.ack' && session.transfer.senderId === this.deviceId) {
-      if (session.ack?.sequence === event.sequence && event.bytes === Math.min((event.sequence + 1) * CHUNK_SIZE, session.transfer.item.size)) { clearTimeout(session.ack.timer); session.ack.resolve(); session.ack = undefined; }
+      if (event.bytes === Math.min((event.sequence + 1) * CHUNK_SIZE, session.transfer.item.size) && session.window.acknowledge(event.sequence)) {
+        session.bytes = Math.max(session.bytes, event.bytes);
+        this.callbacks.progress(session.transfer.id, session.meter.update(session.bytes, session.transfer.item.size));
+      }
       return;
     }
     session.chain = session.chain.then(async () => {
@@ -130,7 +134,7 @@ export class TransferEngine {
           if ((session.transfer.senderId === this.deviceId && event.description.type !== 'answer') || (session.transfer.receiverId === this.deviceId && event.description.type !== 'offer')) throw new Error('Invalid connection negotiation.');
           await pc.setRemoteDescription(event.description);
           for (const candidate of session.candidates) await pc.addIceCandidate(candidate); session.candidates = [];
-          if (event.description.type === 'offer') { await pc.setLocalDescription(await pc.createAnswer()); this.callbacks.send({ type: 'signal', transferId: session.transfer.id, description: { type: 'answer', sdp: pc.localDescription!.sdp } }); }
+          if (event.description.type === 'offer') { await pc.setLocalDescription(await pc.createAnswer()); await this.callbacks.send({ type: 'signal', transferId: session.transfer.id, description: { type: 'answer', sdp: pc.localDescription!.sdp } }); }
         }
         if (event.candidate) { if (pc.remoteDescription) await pc.addIceCandidate(event.candidate); else session.candidates.push(event.candidate); }
       }
@@ -144,8 +148,12 @@ export class TransferEngine {
         if (this.callbacks.dataChannelAcks && session.channel?.readyState === 'open') {
           // Keep per-chunk round trips on the peer channel. Only durable progress
           // checkpoints use HTTPS; the last one is committed before completion.
-          if (performance.now()-session.checkpointAt >= 1000 || session.bytes === session.transfer.item.size) {
-            await this.callbacks.send(ack); session.checkpointAt = performance.now();
+          if (session.bytes === session.transfer.item.size) {
+            await session.checkpoint;
+            await this.callbacks.send(ack);
+          } else if (!session.checkpoint && performance.now()-session.checkpointAt >= 5000) {
+            session.checkpointAt = performance.now();
+            session.checkpoint = Promise.resolve(this.callbacks.send(ack)).catch(error => this.fail(session, error)).finally(() => { session.checkpoint = undefined; });
           }
           session.channel.send(JSON.stringify(ack));
         } else await this.callbacks.send(ack);
@@ -156,20 +164,20 @@ export class TransferEngine {
         const content = await session.sink.finish();
         if (session.sink.dispose) this.disposers.set(session.transfer.id, session.sink.dispose);
         this.callbacks.received(session.transfer.id, content);
-        this.callbacks.send({ type: 'transfer.complete', transferId: session.transfer.id });
+        await this.callbacks.send({ type: 'transfer.complete', transferId: session.transfer.id });
       }
     }).catch(error => this.fail(session, error));
   }
   private fail(session: Session, error: unknown) {
     if (session.aborted) return;
     const message = error instanceof Error ? error.message : 'Transfer interrupted. Please retry.';
-    this.callbacks.send({ type: 'transfer.fail', transferId: session.transfer.id, reason: 'Transfer interrupted' });
+    void Promise.resolve(this.callbacks.send({ type: 'transfer.fail', transferId: session.transfer.id, reason: 'Transfer interrupted' })).catch(() => undefined);
     this.callbacks.error(message); this.stop(session.transfer.id, true);
   }
   stop(id: string, abort: boolean) {
     const session = this.sessions.get(id); if (!session) return;
     session.aborted = true;
-    if (session.ack) { clearTimeout(session.ack.timer); session.ack.reject(new Error('Transfer stopped.')); }
+    session.window.cancel();
     session.channel?.close(); session.pc?.close();
     if (abort) void session.sink?.abort().catch(() => undefined);
     this.sessions.delete(id); this.files.delete(id);

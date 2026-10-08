@@ -1,5 +1,6 @@
+import { iceConfiguration } from './ice';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createHmac, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { WebSocket } from 'ws';
 import { CHUNK_SIZE, PAIRING_TTL, createTransferSchema, joinSchema, registerSchema, signalSchema, terminalStates, type ServerEvent, type Transfer } from '../src/shared/protocol';
@@ -67,14 +68,7 @@ export class Platform {
         const ticket = secret(); this.tickets.set(hash(ticket), { deviceId: device.id, expiresAt: Date.now() + 30000 }); return respond({ ticket });
       }
       if (method === 'GET' && path === '/ice') {
-        const iceServers: { urls: string[]; username?: string; credential?: string }[] = [];
-        const stun = (process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302').split(',').filter(Boolean);
-        if (stun.length) iceServers.push({ urls: stun });
-        if (process.env.TURN_URLS && process.env.TURN_SECRET) {
-          const username = `${Math.floor(Date.now() / 1000) + 3600}:${device.id}`;
-          iceServers.push({ urls: process.env.TURN_URLS.split(','), username, credential: createHmac('sha1', process.env.TURN_SECRET).update(username).digest('base64') });
-        }
-        return respond({ iceServers });
+        return respond({ ...await iceConfiguration(device.id), relayAvailable:true });
       }
       if (method === 'PATCH' && path === `/devices/${device.id}`) {
         const { name } = z.object({ name: z.string().trim().min(1).max(48) }).strict().parse(await this.body(req));

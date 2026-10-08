@@ -49,7 +49,9 @@ TURN_URLS=<provider supplied comma-separated TURN URLs>
 TURN_SECRET=<provider supplied shared HMAC secret>
 ```
 
-The Vercel domain is not a TURN server. Some providers issue username/password credentials through their own API instead; those require a provider adapter, not copying an API token into TURN_SECRET. The secret stays on the server and only short-lived credentials reach the client.
+The Vercel domain is not a TURN server. The Cloudflare Realtime TURN adapter is implemented: set `CLOUDFLARE_TURN_KEY_ID` and `CLOUDFLARE_TURN_API_TOKEN` in Vercel Production environment variables, then redeploy. Leave `TURN_URLS` and `TURN_SECRET` empty. NearDrop calls Cloudflare's credential endpoint server-side and supplies temporary credentials to the authenticated browser. Never use `NEXT_PUBLIC_` for these values. A 24-hour credential lifetime supports long transfers; transfers longer than that require a new connection. The coturn configuration above remains a fallback when Cloudflare is not configured.
+
+See [Cloudflare credential setup](https://developers.cloudflare.com/realtime/turn/generate-credentials/) and `config/cloudflare.env.example`. Set both Cloudflare variables; a provider error is shown explicitly instead of reporting the device offline. TURN allows different networks and isolated Wi-Fi clients to communicate, subject to provider availability and network firewall policies.
 
 Both clients must remain open. Reconnection starts a fresh control session and interrupts unfinished transfers; Retry sends the file from the beginning. Presence expires after 45 seconds without a poll. Only one tab may control a device session.
 

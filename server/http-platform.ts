@@ -1,4 +1,6 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { iceConfiguration } from './ice';
+import { chatRequest } from './chat';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { CHUNK_SIZE, PAIRING_TTL, createTransferSchema, joinSchema, registerSchema, signalSchema, terminalStates, type ServerEvent, type Transfer } from '../src/shared/protocol';
 import { ApiError, assert, hash, pairingCode, secret } from './security';
@@ -68,7 +70,10 @@ async function message(store: HttpStore, device: StoredDevice, input: z.infer<ty
   await store.lockDevices([previous.senderId,previous.receiverId]);
   const t=(await store.transfer(input.transferId,true))!;
   assert(await store.related(t.senderId,t.receiverId),403,'Pair this device before sending.');
-  assert(!terminalStates.includes(t.status) && t.status!=='waiting',409,'This transfer is not active.');
+  // In-flight ICE/ack messages can arrive after cancellation/completion. They
+  // belong to this authenticated transfer, not a broken device session.
+  if (terminalStates.includes(t.status)) return;
+  assert(t.status!=='waiting',409,'This transfer is not active.');
   const sender=t.senderId===device.id, peer=sender?t.receiverId:t.senderId;
   if(input.type==='signal') { await store.emit(peer,input); return; }
   if(input.type==='transfer.transport') {
@@ -126,6 +131,8 @@ export async function handleHttp(request: Request): Promise<Response> {
     const device=await transaction(store=>authorized(store,request));
     if(path==='/pairing/join') {await rateLimit(`join-ip:${hash(ip)}`,10,300000);await rateLimit(`join:${device.id}`,10,300000);}
     else if(path==='/pairing/create') await rateLimit(`pair:${device.id}`,12);
+    else if(path==='/chat/messages' && method==='POST') await rateLimit(`chat:${device.id}`,30);
+    else if(path==='/ice') await rateLimit(`ice:${device.id}`,12);
     else if(path==='/auth/associate') await rateLimit(`auth:${device.id}`,10);
     else await rateLimit(`http:${device.id}`,600);
     if(path==='/events' && method==='GET')await transaction(store=>expireInterruptedTransfers(store,device.id));
@@ -134,6 +141,10 @@ export async function handleHttp(request: Request): Promise<Response> {
     return await transaction(async store=>{
       // Check again inside the mutation transaction after any previous sign-out.
       const current=await authorized(store,request);
+      if(path.startsWith('/chat/')) {
+        await store.sql.query('DELETE FROM nd_chat_messages WHERE expires_at<now()');
+        return json(await chatRequest(store,current.id,url,method,input));
+      }
       if(path==='/session/connect' && method==='POST') {
         const connectionId=randomUUID();
         const active=await store.sql.query<{data:Transfer}>(`SELECT data FROM transfer_sessions WHERE (sender_id=$1 OR receiver_id=$1) AND ${activeSql}`, [current.id]);
@@ -166,14 +177,7 @@ export async function handleHttp(request: Request): Promise<Response> {
       }
       if(path==='/devices' && method==='GET')return json({device:store.visible(current),devices:await store.devices(current.id)});
       if(path==='/ice' && method==='GET') {
-        const iceServers:{urls:string[];username?:string;credential?:string}[]=[];
-        const stun=(process.env.STUN_URLS??'stun:stun.l.google.com:19302').split(',').map(s=>s.trim()).filter(Boolean);
-        if(stun.length)iceServers.push({urls:stun});
-        if(process.env.TURN_URLS && process.env.TURN_SECRET) {
-          const username=`${Math.floor(Date.now()/1000)+3600}:${current.id}`;
-          iceServers.push({urls:process.env.TURN_URLS.split(',').map(s=>s.trim()).filter(Boolean),username,credential:createHmac('sha1',process.env.TURN_SECRET).update(username).digest('base64')});
-        }
-        return json({iceServers,relayAvailable:false});
+        return json({ ...await iceConfiguration(current.id), relayAvailable:false });
       }
       if(path===`/devices/${current.id}` && method==='PATCH') {
         const {name}=z.object({name:z.string().trim().min(1).max(48)}).strict().parse(input);

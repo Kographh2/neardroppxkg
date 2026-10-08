@@ -1,4 +1,4 @@
-import { api } from './api';
+import { api, HttpError } from './api';
 import type { ClientEvent, Device, ServerEvent } from '../shared/protocol';
 
 interface EventPage { events: ServerEvent[]; cursor: number; devices: Device[] }
@@ -32,7 +32,7 @@ export class HttpSignaling {
       if(this.stopped || !this.connectionId)throw new Error('The NearDrop connection ended.');
       await api('/events',{connectionId:this.connectionId,event});
     });
-    this.sends=operation.catch(error=>{if(!this.stopped){this.close();this.failed(error);}});
+    this.sends=operation.catch(error=>{if(!this.stopped && (!(error instanceof HttpError) || error.status===401 || error.code==='CONNECTION_REPLACED' || error.code==='CONNECTION_EXPIRED')){this.close();this.failed(error);}});
     return operation;
   }
   close() {this.stopped=true;clearTimeout(this.timer);}
