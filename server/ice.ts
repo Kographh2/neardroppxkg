@@ -19,7 +19,9 @@ export async function iceConfiguration(deviceId: string) {
       const result = iceSchema.parse(await response.json());
       const iceServers = result.iceServers.map(server => ({ ...server, urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter(url => /^(stun|turn|turns):/.test(url) && !/:53(?:\?|$)/.test(url)) })).filter(server => server.urls.length);
       if (!iceServers.some(s => s.credential && s.urls.some(u => /^turns?:/.test(u)))) throw new Error('Missing TURN credentials');
-      return { iceServers, turnConfigured: true };
+      // Avoid negotiating six equivalent Cloudflare routes serially over HTTPS.
+      // Keep standard UDP plus TLS/443 for restrictive networks, and STUN.
+      return { iceServers: iceServers.map(s => ({ ...s, urls: s.urls.filter(u => u.startsWith('stun:') || /^turn:.*:3478\?transport=udp$/.test(u) || /^turns:.*:443\?transport=tcp$/.test(u)) })).filter(s => s.urls.length), turnConfigured: true };
     } catch { throw new ApiError(503, 'The secure connection service is unavailable. Check Cloudflare TURN credentials and try again.'); }
   }
   const iceServers: { urls: string[]; username?: string; credential?: string }[] = [];

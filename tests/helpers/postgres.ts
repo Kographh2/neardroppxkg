@@ -6,7 +6,7 @@ import pg from 'pg';
 /** Real PostgreSQL SQL engine, isolated from DATABASE_URL and production data. */
 export async function testPostgres() {
   const db = new PGlite();
-  for (const name of ['001_platform.sql', '002_http_signaling.sql', '003_private_chat.sql'])
+  for (const name of ['001_platform.sql', '002_http_signaling.sql', '003_private_chat.sql', '004_near_chat.sql'])
     await db.exec(await readFile(new URL(`../../migrations/${name}`,import.meta.url),'utf8'));
   let tail=Promise.resolve();
   async function acquire() {

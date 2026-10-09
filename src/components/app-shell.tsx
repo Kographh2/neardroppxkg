@@ -1,4 +1,5 @@
 'use client';
+import { ThemeButton } from './theme-button';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -8,15 +9,10 @@ import { DeviceIcon, Modal } from './primitives';
 import { PairingPanel } from './pairing';
 import { usePlatform } from '@/lib/hooks';
 import { platform } from '@/lib/platform-client';
-import { preferences } from '@/lib/local-preferences';
 import { MessageSquare } from 'lucide-react';
 import { connectionHints, connectionLabels } from '@/lib/connection-status';
 const navigation = [{ href: '/drop', label: 'Transfer', Icon: ArrowUpRight }, { href: '/chat', label: 'Chat', Icon: MessageSquare }, { href: '/devices', label: 'Devices', Icon: MonitorSmartphone }, { href: '/history', label: 'History', Icon: Clock3 }];
-export function ThemeButton() {
-  const [dark, setDark] = useState(false);
-  useEffect(() => setDark(document.documentElement.dataset.theme === 'dark'), []);
-  return <button className="icon-button" title={dark ? 'Switch to light theme' : 'Switch to dark theme'} aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={() => { const next = !dark; setDark(next); document.documentElement.dataset.theme = next ? 'dark' : 'light'; preferences.setItem('nd-theme', next ? 'dark' : 'light'); }}>{dark ? <Sun size={18}/> : <Moon size={18}/>}</button>;
-}
+export { ThemeButton } from './theme-button';
 export function AppShell({ children }: { children: ReactNode }) {
   const path = usePathname(); const state = usePlatform(); const [pair, setPair] = useState(false); const [help, setHelp] = useState(false);
   useEffect(() => { if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => undefined); }, []);
