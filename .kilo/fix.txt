@@ -1,0 +1,6 @@
+﻿    }catch(_){ /* ignore poll errors */ }
+    if(!stopped) timer=setTimeout(()=>{void poll();},2000);
+  }
+  void poll();
+  return ()=>{stopped=true; clearTimeout(timer);};
+  },[profile,active,call,callState]);
