@@ -228,6 +228,8 @@ export async function nearChatApi(request: Request) {
           assert(p.roomId,400,'Room required.'); await member(store,userId,p.roomId);
           const room=await store.sql.query("SELECT kind FROM nc_rooms WHERE id=$1",[p.roomId]); assert(room.rows[0]?.kind==='direct',400,'Calls are available in direct chats.');
           const other=await store.sql.query('SELECT user_id FROM nc_members WHERE room_id=$1 AND user_id<>$2 LIMIT 1',[p.roomId,userId]); assert(other.rows[0],404,'No one to call.');
+          const existing=await store.sql.query("SELECT id,room_id AS \"roomId\",caller_id AS \"callerId\",callee_id AS \"calleeId\",kind,status,offer,answer,caller_ice AS \"callerIce\",callee_ice AS \"calleeIce\",created_at AS \"createdAt\",updated_at AS \"updatedAt\" FROM nc_calls WHERE room_id=$1 AND status IN ('ringing','active') AND updated_at>now()-interval '2 minutes' ORDER BY updated_at DESC LIMIT 1",[p.roomId]);
+          if(existing.rows[0]) return json({id:existing.rows[0].id, call:existing.rows[0]},200);
           const id=p.callId||randomUUID();
           await store.sql.query(`INSERT INTO nc_calls(id,room_id,caller_id,callee_id,kind,status) VALUES($1,$2,$3,$4,'audio','ringing') ON CONFLICT(id) DO NOTHING`,[id,p.roomId,userId,other.rows[0].user_id]);
           return json({id},201);
@@ -235,16 +237,16 @@ export async function nearChatApi(request: Request) {
         assert(p.callId,400,'callId required.');
         const c=await store.sql.query('SELECT * FROM nc_calls WHERE id=$1 FOR UPDATE',[p.callId]); assert(c.rows[0],404,'Call not found.'); const call=c.rows[0];
         assert(call.caller_id===userId || call.callee_id===userId,403,'Not allowed.');
-        if(p.action==='offer'){await store.sql.query("UPDATE nc_calls SET offer=$2,status='ringing',updated_at=now() WHERE id=$1",[p.callId,p.payload||'']);}
-        else if(p.action==='answer'){await store.sql.query("UPDATE nc_calls SET answer=$2,status='active',updated_at=now() WHERE id=$1",[p.callId,p.payload||'']);}
+        if(p.action==='offer'){await store.sql.query("UPDATE nc_calls SET offer=$2,status='ringing',updated_at=now() WHERE id=$1 AND status IN ('ringing','active')",[p.callId,p.payload||'']);}
+        else if(p.action==='answer'){await store.sql.query("UPDATE nc_calls SET answer=$2,status='active',updated_at=now() WHERE id=$1 AND status IN ('ringing','active')",[p.callId,p.payload||'']);}
         else if(p.action==='ice'){const col=call.caller_id===userId?'caller_ice':'callee_ice'; await store.sql.query(`UPDATE nc_calls SET ${col}=COALESCE(${col},'[]'::jsonb) || $2::jsonb,updated_at=now() WHERE id=$1`,[p.callId,JSON.stringify([p.payload||''])]);}
         else if(p.action==='decline'){await store.sql.query("UPDATE nc_calls SET status='declined',updated_at=now() WHERE id=$1",[p.callId]);}
-        else if(p.action==='end'){await store.sql.query("UPDATE nc_calls SET status='ended',updated_at=now() WHERE id=$1",[p.callId]);}
+        else if(p.action==='end'){await store.sql.query("UPDATE nc_calls SET status=CASE WHEN status='ringing' THEN 'missed' ELSE 'ended' END,updated_at=now() WHERE id=$1",[p.callId]);}
         return json({ok:true});
       }
       if(path==='/calls' && method==='GET'){
         const roomId=url.searchParams.get('roomId'); assert(roomId,400,'roomId required.'); await member(store,userId,roomId);
-        const r=await store.sql.query("SELECT id,room_id AS \"roomId\",caller_id AS \"callerId\",callee_id AS \"calleeId\",kind,status,offer,answer,caller_ice AS \"callerIce\",callee_ice AS \"calleeIce\",created_at AS \"createdAt\",updated_at AS \"updatedAt\" FROM nc_calls WHERE room_id=$1 AND updated_at>now()-interval '2 hours' ORDER BY updated_at DESC LIMIT 1",[roomId]);
+        const r=await store.sql.query("SELECT id,room_id AS \"roomId\",caller_id AS \"callerId\",callee_id AS \"calleeId\",kind,status,offer,answer,caller_ice AS \"callerIce\",callee_ice AS \"calleeIce\",created_at AS \"createdAt\",updated_at AS \"updatedAt\" FROM nc_calls WHERE room_id=$1 ORDER BY updated_at DESC LIMIT 1",[roomId]);
         return json({call:(r.rows[0]||null) as CallState|null});
       }
 

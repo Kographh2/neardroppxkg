@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -39,7 +39,7 @@ export function NearChatApp() {
   const [menu,setMenu]=useState<{x:number;y:number;message:Message}|null>(null),[replyTo,setReplyTo]=useState<Message|null>(null),[forward,setForward]=useState<Message|null>(null);
   const [tab,setTab]=useState<'chats'|'status'|'calls'>('chats');
   const [call,setCall]=useState<CallState|null>(null),[callState,setCallState]=useState<'idle'|'calling'|'incoming'|'active'>('idle');
-  const pc=useRef<RTCPeerConnection|null>(null),localStream=useRef<MediaStream|null>(null),remoteAudio=useRef<HTMLAudioElement|null>(null),seenIce=useRef<Set<string>>(new Set());
+  const pc=useRef<RTCPeerConnection|null>(null),localStream=useRef<MediaStream|null>(null),remoteAudio=useRef<HTMLAudioElement|null>(null),seenIce=useRef<Set<string>>(new Set()),handledCalls=useRef<Set<string>>(new Set());
   const scroller=useRef<HTMLDivElement>(null),bottom=useRef<HTMLDivElement>(null),activeRef=useRef(active),readRef=useRef(0),profileRef=useRef(profile);
   const historyExhausted=useRef(false),pending=useRef<{id:string;roomId:string}|null>(null),pressTimer=useRef<any>(null),fileRef=useRef<HTMLInputElement>(null);
   activeRef.current=active; profileRef.current=profile;
@@ -97,18 +97,91 @@ export function NearChatApp() {
   function pickImage(e:React.ChangeEvent<HTMLInputElement>){ const f=e.target.files?.[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{const img=new Image(); img.onload=()=>{const c=document.createElement('canvas'); const max=1280; const s=Math.min(max/img.width,max/img.height,1); c.width=Math.max(1,Math.round(img.width*s)); c.height=Math.max(1,Math.round(img.height*s)); c.getContext('2d')?.drawImage(img,0,0,c.width,c.height); void send({body:draft.trim(),kind:'image',attachment:c.toDataURL('image/jpeg',0.82)});}; img.src=String(r.result||'');}; r.readAsDataURL(f); e.target.value=''; }
 
   // audio call (WebRTC signaling via server polling)
-  async function ensurePeer(target:CallState){
+  const callRef = useRef<CallState|null>(null), callStateRef = useRef<'idle'|'calling'|'incoming'|'active'>('idle');
+  useEffect(()=>{ callRef.current=call; callStateRef.current=callState; },[call,callState]);
+
+  function cleanupCall(callId?:string){
+    if(callId) handledCalls.current.add(callId);
+    try{ pc.current?.close(); }catch{}
+    pc.current=null;
+    try{ localStream.current?.getTracks().forEach(t=>t.stop()); }catch{}
+    localStream.current=null;
+    if(remoteAudio.current) remoteAudio.current.srcObject=null;
+    seenIce.current=new Set();
+    setCall(null);
+    setCallState('idle');
+  }
+
+  async function ensurePeer(targetId:string){
     if(pc.current) return pc.current;
-    const conn=new RTCPeerConnection({iceServers:[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']}]}); pc.current=conn;
-    conn.onicecandidate=e=>{ if(e.candidate && target.id) void chatApi('/calls',{action:'ice',callId:target.id,payload:JSON.stringify(e.candidate)}).catch(()=>{}); };
-    conn.ontrack=e=>{ const a=remoteAudio.current; if(a){a.srcObject=e.streams[0]; void a.play().catch(()=>{});} };
-    const stream=await navigator.mediaDevices.getUserMedia({audio:true}); localStream.current=stream; stream.getTracks().forEach(t=>conn.addTrack(t,stream));
+    const conn=new RTCPeerConnection({iceServers:[{urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']}]});
+    pc.current=conn;
+    conn.onicecandidate=e=>{ if(e.candidate) void chatApi('/calls',{action:'ice',callId:targetId,payload:JSON.stringify(e.candidate)}).catch(()=>{}); };
+    conn.ontrack=e=>{ const a=remoteAudio.current; if(a){ a.srcObject=e.streams[0]; void a.play().catch(()=>{}); } };
+    conn.onconnectionstatechange=()=>{ if(['failed','disconnected','closed'].includes(conn.connectionState)){ const cur=callRef.current; if(cur) void endCall('end'); } };
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    localStream.current=stream;
+    stream.getTracks().forEach(t=>conn.addTrack(t,stream));
     return conn;
   }
-  function cleanupCall(){ pc.current?.close(); pc.current=null; localStream.current?.getTracks().forEach(t=>t.stop()); localStream.current=null; seenIce.current=new Set(); setCall(null); setCallState('idle'); }
-  async function startCall(){ const room=rooms.find(r=>r.id===active); if(!room||room.kind!=='direct') return; try{ const r=await chatApi<{id:string}>('/calls',{action:'start',roomId:active}); const c={id:r.id,roomId:active,callerId:profile!.id,calleeId:room.members.find(m=>m.id!==profile!.id)?.id||'',kind:'audio',status:'ringing',callerIce:[],calleeIce:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()} as CallState; setCall(c); setCallState('calling'); const conn=await ensurePeer(c); const offer=await conn.createOffer(); await conn.setLocalDescription(offer); await chatApi('/calls',{action:'offer',callId:c.id,payload:JSON.stringify(offer)}); }catch(cause){fail(cause); cleanupCall();} }
-  async function answerCall(){ if(!call) return; try{ const conn=await ensurePeer(call); if(call.offer && !conn.currentRemoteDescription){ await conn.setRemoteDescription(JSON.parse(call.offer)); const ans=await conn.createAnswer(); await conn.setLocalDescription(ans); await chatApi('/calls',{action:'answer',callId:call.id,payload:JSON.stringify(ans)}); setCallState('active'); } }catch(cause){fail(cause);} }
-  async function endCall(status:'end'|'decline'='end'){ if(call) await chatApi('/calls',{action:status,callId:call.id}).catch(()=>{}); cleanupCall(); }
+
+  async function startCall(){
+    const room=rooms.find(r=>r.id===active);
+    if(!room||room.kind!=='direct'||!profile) return;
+    if(callStateRef.current!=='idle') return;
+    try{
+      const r=await chatApi<{id:string;call?:CallState}>('/calls',{action:'start',roomId:active});
+      const callId=r.id;
+      handledCalls.current.delete(callId);
+      const c=(r.call as CallState|undefined) || ({id:callId,roomId:active,callerId:profile.id,calleeId:room.members.find(m=>m.id!==profile.id)?.id||'',kind:'audio',status:'ringing',callerIce:[],calleeIce:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()} as CallState);
+      setCall(c); setCallState('calling');
+      const conn=await ensurePeer(callId);
+      const offer=await conn.createOffer({offerToReceiveAudio:true});
+      await conn.setLocalDescription(offer);
+      await chatApi('/calls',{action:'offer',callId,payload:JSON.stringify(offer)});
+    }catch(cause){
+      const msg=cause instanceof Error?cause.message:String(cause);
+      if(/denied|permission|notallowed/i.test(msg)) setError('Microphone access denied. Izinkan mikrofon di browser (ikon kunci/site settings) lalu coba lagi.');
+      else fail(cause);
+      cleanupCall();
+    }
+  }
+
+  async function answerCall(){
+    const cur=callRef.current;
+    if(!cur || callStateRef.current!=='incoming') return;
+    try{
+      const conn=await ensurePeer(cur.id);
+      if(cur.offer && !conn.currentRemoteDescription){
+        await conn.setRemoteDescription(JSON.parse(cur.offer));
+      }
+      if(!conn.localDescription){
+        const ans=await conn.createAnswer();
+        await conn.setLocalDescription(ans);
+        await chatApi('/calls',{action:'answer',callId:cur.id,payload:JSON.stringify(ans)});
+      } else {
+        await chatApi('/calls',{action:'answer',callId:cur.id,payload:JSON.stringify(conn.localDescription)});
+      }
+      setCallState('active');
+    }catch(cause){
+      const msg=cause instanceof Error?cause.message:String(cause);
+      if(/denied|permission|notallowed/i.test(msg)) setError('Microphone access denied. Izinkan mikrofon untuk menerima panggilan.');
+      else fail(cause);
+      await chatApi('/calls',{action:'decline',callId:cur.id}).catch(()=>{});
+      cleanupCall(cur.id);
+    }
+  }
+
+  async function endCall(status:'end'|'decline'='end'){
+    const cur=callRef.current;
+    if(cur){
+      handledCalls.current.add(cur.id);
+      await chatApi('/calls',{action:status,callId:cur.id}).catch(()=>{});
+      cleanupCall(cur.id);
+    } else {
+      cleanupCall();
+    }
+  }
 
   useEffect(()=>{
     if(!profile) return;
@@ -116,22 +189,32 @@ export function NearChatApp() {
     let timer:ReturnType<typeof setTimeout>;
     async function poll(){
       try{
-        if(activeRef.current){
-          const r=await chatApi<{call:CallState|null}>(`/calls?roomId=${activeRef.current}`);
+        const activeId=activeRef.current;
+        if(activeId){
+          const r=await chatApi<{call:CallState|null}>(`/calls?roomId=${activeId}`);
           if(stopped) return;
           const c=r.call;
-          if(c){
-            if(c.status==='ringing' && c.calleeId===profileRef.current?.id && callState==='idle'){
+          const cur=callRef.current;
+          const st=callStateRef.current;
+
+          if(!c){
+            // no active call record
+          } else if(['ended','declined','missed'].includes(c.status)){
+            handledCalls.current.add(c.id);
+            if(cur?.id===c.id || st!=='idle') cleanupCall(c.id);
+          } else if(c.status==='ringing'){
+            if(st==='idle' && c.calleeId===profileRef.current?.id && !handledCalls.current.has(c.id)){
+              setCall(c); setCallState('incoming');
+            } else if(cur?.id===c.id){
               setCall(c);
-              setCallState('incoming');
             }
-            if(call?.id===c.id){
+          } else if(c.status==='active'){
+            if(cur?.id===c.id){
               setCall(c);
               const conn=pc.current;
               if(conn){
                 if(c.answer && conn.localDescription && !conn.currentRemoteDescription){
-                  await conn.setRemoteDescription(JSON.parse(c.answer));
-                  setCallState('active');
+                  await conn.setRemoteDescription(JSON.parse(c.answer)).catch(()=>{});
                 }
                 const ices=(profileRef.current?.id===c.callerId?c.calleeIce:c.callerIce)||[];
                 for(const raw of ices){
@@ -141,21 +224,20 @@ export function NearChatApp() {
                   }
                 }
               }
-            }
-            if(['ended','declined','missed'].includes(c.status) && call?.id===c.id){
-              cleanupCall();
+              if(st==='calling' || st==='incoming') setCallState('active');
+            } else if(st==='idle' && c.calleeId===profileRef.current?.id && !handledCalls.current.has(c.id)){
+              // missed ringing window but call became active (rare) - ignore
             }
           }
         }
       } catch(_) { /* ignore poll errors */ }
-      if(!stopped) timer=setTimeout(()=>{void poll();},2000);
+      if(!stopped) timer=setTimeout(()=>{void poll();},1500);
     }
     void poll();
     return ()=>{stopped=true; clearTimeout(timer);};
-  },[profile,active,call,callState]);
+  },[profile,active]);
 
-
-  if(loading)return <main className="nc-loading"><MessageCircle size={30}/><p>Opening NearChatâ€¦</p></main>;
+  if(loading)return <main className="nc-loading"><MessageCircle size={30}/><p>Opening NearChatÃ¢â‚¬Â¦</p></main>;
   if(!profile||params.get('recovery'))return <><AuthScreen onLogin={loggedIn} recovery={!!params.get('recovery')}/>{error&&<div className="nc-global-error" role="alert">{error}<button onClick={()=>void reload()}>Try again</button></div>}</>;
   const room=rooms.find(r=>r.id===active);
   const filtered=rooms.filter(r=>title(r,profile.id).toLowerCase().includes(query.toLowerCase()));
@@ -172,9 +254,9 @@ export function NearChatApp() {
     {tab==='calls'&&<div className="nc-status-tab"><p className="nc-date">Audio calls are available in direct chats. Open a direct chat and tap the call button.</p><div className="nc-status-list">{rooms.filter(r=>r.kind==='direct').slice(0,20).map(r=>{const peer=r.members.find(m=>m.id!==profile.id); return <button key={r.id} className="nc-status-item" onClick={()=>{setTab('chats');setActive(r.id);}}><Avatar name={title(r,profile.id)} avatar={peer?.avatar||null}/><span><strong>{title(r,profile.id)}</strong><small>Tap to open chat and call</small></span><Phone size={16}/></button>;})}</div></div>}
     <footer><button className="nc-profile" onClick={()=>setDialog('profile')}><Avatar name={profile.displayName} avatar={profile.avatar||null} size={40}/><span><strong>{profile.displayName}</strong><small>{profile.phone||('@'+profile.username)}</small></span><Settings2 size={17}/></button><div className="nc-shortcuts"><button onClick={()=>setDialog('link')}><Link2 size={17}/> Link</button><button onClick={()=>setDialog('devices')}><MonitorSmartphone size={17}/> Devices</button><button onClick={()=>void signOut()} aria-label="Sign out"><LogOut size={17}/></button></div></footer></aside>
 
-    <main className="nc-conversation" id="main-content">{room?<><header><button className="nc-icon nc-mobile-back" aria-label="Back to chats" onClick={()=>setActive('')}><ArrowLeft/></button><Avatar name={title(room,profile.id)} avatar={room.kind==='direct'?room.members.find(m=>m.id!==profile.id)?.avatar||null:null} group={room.kind==='group'}/><button className="nc-room-title" onClick={()=>setDialog('info')}><strong>{title(room,profile.id)}</strong><span>{room.kind==='group'?`${room.members.length} people · Group details`: (room.members.find(m=>m.id!==profile.id)?.phone||'Conversation details')}</span></button>{room.kind==='direct'&&<button className="nc-icon" aria-label="Audio call" onClick={()=>void startCall()}><Phone size={18}/></button>}</header>
+    <main className="nc-conversation" id="main-content">{room?<><header><button className="nc-icon nc-mobile-back" aria-label="Back to chats" onClick={()=>setActive('')}><ArrowLeft/></button><Avatar name={title(room,profile.id)} avatar={room.kind==='direct'?room.members.find(m=>m.id!==profile.id)?.avatar||null:null} group={room.kind==='group'}/><button className="nc-room-title" onClick={()=>setDialog('info')}><strong>{title(room,profile.id)}</strong><span>{room.kind==='group'?`${room.members.length} people Â· Group details`: (room.members.find(m=>m.id!==profile.id)?.phone||'Conversation details')}</span></button>{room.kind==='direct'&&<button className="nc-icon" aria-label="Audio call" onClick={()=>void startCall()}><Phone size={18}/></button>}</header>
       {error&&<div className="nc-error-bar" role="alert">{error}<button aria-label="Dismiss error" onClick={()=>setError('')}><X size={16}/></button></div>}
-      <div className="nc-message-list" ref={scroller}>{more&&<button className="nc-load-more" onClick={()=>void older()}>Load older messages</button>}{loadingMessages&&<p className="nc-date">Loading conversationâ€¦</p>}{!loadingMessages&&!messages.length&&<div className="nc-chat-empty"><h2>Say something good.</h2><p>Send the first message in this conversation.</p></div>}
+      <div className="nc-message-list" ref={scroller}>{more&&<button className="nc-load-more" onClick={()=>void older()}>Load older messages</button>}{loadingMessages&&<p className="nc-date">Loading conversationÃ¢â‚¬Â¦</p>}{!loadingMessages&&!messages.length&&<div className="nc-chat-empty"><h2>Say something good.</h2><p>Send the first message in this conversation.</p></div>}
       {messages.map((m,index)=>{ const reply=m.replyTo?messages.find(x=>x.id===m.replyTo)||null:null; return <div key={m.id}>{(index===0||new Date(messages[index-1].createdAt).toDateString()!==new Date(m.createdAt).toDateString())&&<p className="nc-date">{new Date(m.createdAt).toLocaleDateString([],{day:'numeric',month:'long',year:'numeric'})}</p>}
       <article className={`nc-bubble ${m.senderId===profile.id?'own':''} ${m.deleted?'deleted':''}`} onContextMenu={e=>openMenu(e,m)} onPointerDown={e=>{ if(e.pointerType==='touch'){pressTimer.current=setTimeout(()=>openMenu(e as any,m),450);} }} onPointerUp={()=>clearTimeout(pressTimer.current)} onPointerLeave={()=>clearTimeout(pressTimer.current)}>
         {room.kind==='group'&&m.senderId!==profile.id&&<strong>{m.senderName}</strong>}
@@ -186,7 +268,7 @@ export function NearChatApp() {
       <form className="nc-composer" onSubmit={e=>{e.preventDefault();void send();}}>
         <input ref={fileRef} type="file" accept="image/*" hidden onChange={pickImage}/>
         <button type="button" className="nc-icon" aria-label="Send image" onClick={()=>fileRef.current?.click()}><ImageIcon size={20}/></button>
-        <textarea aria-label="Message" placeholder="Write a messageâ€¦" value={draft} maxLength={4000} rows={1} disabled={sending} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();void send();}}}/>
+        <textarea aria-label="Message" placeholder="Write a messageÃ¢â‚¬Â¦" value={draft} maxLength={4000} rows={1} disabled={sending} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();void send();}}}/>
         <button aria-label="Send message" className="nc-send" disabled={!draft.trim()||sending}><Send size={20}/></button>
       </form>
     </>:<div className="nc-welcome"><span><MessageCircle size={45}/></span><h2>A little closer.</h2><p>Choose a conversation, or start a new one. You can add contacts by username/number, post status, send images, and make audio calls.</p><div style={{display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap'}}><button className="nc-primary" onClick={()=>setDialog('new')}><Plus size={17}/> New conversation</button><button className="nc-secondary" onClick={()=>setDialog('contact')}><UserPlus size={17}/> Add contact</button></div><small>Account-protected rooms. Messages are not end-to-end encrypted.</small></div>}</main>
@@ -198,9 +280,9 @@ export function NearChatApp() {
       {menu.message.senderId===profile.id&&!menu.message.deleted&&<button onClick={()=>void deleteMsg(menu.message)} className="danger"><Trash2 size={15}/> Delete</button>}
     </div>}
 
-    {callState==='incoming'&&call&&<div className="nc-call-overlay"><div className="nc-call-card"><PhoneIncoming size={30}/><h3>Incoming audio call</h3><p>{rooms.find(r=>r.id===call.roomId)?title(rooms.find(r=>r.id===call.roomId)!,profile.id):'Someone'} is callingâ€¦</p><div style={{display:'flex',gap:12,justifyContent:'center'}}><button className="nc-primary" onClick={()=>void answerCall()}>Accept</button><button className="nc-secondary" onClick={()=>void endCall('decline')}>Decline</button></div></div></div>}
-    {(callState==='calling'||callState==='active')&&call&&<div className="nc-call-overlay"><div className="nc-call-card"><Phone size={30}/><h3>{callState==='calling'?'Callingâ€¦':'Audio call active'}</h3><p>{rooms.find(r=>r.id===call.roomId)?title(rooms.find(r=>r.id===call.roomId)!,profile.id):''}</p><button className="nc-secondary" onClick={()=>void endCall('end')}><PhoneOff size={16}/> End call</button></div></div>}
-    <audio ref={remoteAudio} autoPlay />
+    {callState==='incoming'&&call&&<div className="nc-call-overlay"><div className="nc-call-card incoming"><div className="nc-call-icon pulse"><PhoneIncoming size={28}/></div><h3>Incoming audio call</h3><p className="nc-call-name">{rooms.find(r=>r.id===call.roomId)?title(rooms.find(r=>r.id===call.roomId)!,profile.id):'Someone'}</p><small>NearChat audio call</small><div className="nc-call-actions"><button className="nc-call-btn accept" onClick={()=>void answerCall()}><Phone size={18}/> Accept</button><button className="nc-call-btn decline" onClick={()=>void endCall('decline')}><PhoneOff size={18}/> Decline</button></div></div></div>}
+    {(callState==='calling'||callState==='active')&&call&&<div className="nc-call-overlay"><div className="nc-call-card"><div className={`nc-call-icon ${callState==='calling'?'pulse':''}`}><Phone size={28}/></div><h3>{callState==='calling'?'Calling…':'On call'}</h3><p className="nc-call-name">{rooms.find(r=>r.id===call.roomId)?title(rooms.find(r=>r.id===call.roomId)!,profile.id):''}</p><small>{callState==='calling'?'Ringing':'Audio connected'}</small><div className="nc-call-actions"><button className="nc-call-btn decline" onClick={()=>void endCall('end')}><PhoneOff size={18}/> End</button></div></div></div>}
+    <audio ref={remoteAudio} autoPlay playsInline />
 
     {dialog==='new'&&<NewConversation contacts={contacts} onClose={closeDialog} onCreated={id=>{void refreshRooms().then(()=>{setActive(id);setDialog(null);}).catch(fail);}}/>}
     {dialog==='contact'&&<AddContactDialog onClose={closeDialog} onAdded={c=>{setContacts(v=>[...v.filter(x=>x.id!==c.id),c]); setDialog('new');}}/>}
@@ -209,8 +291,10 @@ export function NearChatApp() {
     {viewStatus&&<StatusViewer statuses={viewStatus} onClose={()=>setViewStatus(null)} onDelete={id=>{void chatApi(`/statuses/${id}`,{},'DELETE').then(()=>{setStatuses(s=>s.filter(x=>x.id!==id)); setViewStatus(v=>v?v.filter(x=>x.id!==id):null);}).catch(fail);}}/>}
     {dialog==='link'&&<LinkDevice initialCode={params.get('link')||''} onClose={closeDialog}/>}
     {dialog==='devices'&&<DevicesDialog onClose={closeDialog}/>}
-    {dialog==='info'&&room&&<Modal title="Conversation details" onClose={closeDialog}><div className="nc-form"><h3>{title(room,profile.id)}</h3>{room.members.map(m=><div className="nc-session" key={m.id}><Avatar name={m.displayName} avatar={(m as any).avatar||null} size={36}/><span><strong>{m.displayName}</strong><small>@{m.username}{(m as any).phone?` · ${(m as any).phone}`:''}</small></span></div>)}<p>Only members can access this room. Messages are stored on the server and protected by account authorization and HTTPS. This version does not use end-to-end encryption.</p>{room.kind==='group'&&<button className="nc-secondary" onClick={()=>setDialog('leave')}>{room.ownerId===profile.id?'Delete group':'Leave group'}</button>}</div></Modal>}
+    {dialog==='info'&&room&&<Modal title="Conversation details" onClose={closeDialog}><div className="nc-form"><h3>{title(room,profile.id)}</h3>{room.members.map(m=><div className="nc-session" key={m.id}><Avatar name={m.displayName} avatar={(m as any).avatar||null} size={36}/><span><strong>{m.displayName}</strong><small>@{m.username}{(m as any).phone?` Â· ${(m as any).phone}`:''}</small></span></div>)}<p>Only members can access this room. Messages are stored on the server and protected by account authorization and HTTPS. This version does not use end-to-end encryption.</p>{room.kind==='group'&&<button className="nc-secondary" onClick={()=>setDialog('leave')}>{room.ownerId===profile.id?'Delete group':'Leave group'}</button>}</div></Modal>}
     {dialog==='leave'&&room&&<Modal title={room.ownerId===profile.id?'Delete this group?':'Leave this group?'} onClose={closeDialog}><div className="nc-form"><p>{room.ownerId===profile.id?'This permanently deletes the group and its messages for all members.':'You will lose access to this conversation.'}</p><button className="nc-primary" onClick={()=>void chatApi(`/rooms/${room.id}/leave`,{}).then(()=>{setActive('');setDialog(null);void refreshRooms();}).catch(fail)}>Confirm</button><button className="nc-secondary" onClick={closeDialog}>Cancel</button></div></Modal>}
   </div>;
 }
+
+
 
